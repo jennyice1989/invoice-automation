@@ -1,21 +1,17 @@
 services:
   - type: web
-    name: a2z-lightspeed-backend
-    runtime: python
+    name: lightspeed-invoice-importer
+    env: python
+    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
     envVars:
-      - key: ADMIN_API_KEY
+      - key: LIGHTSPEED_DOMAIN_PREFIX
         sync: false
-      - key: CORS_ORIGINS
-        value: "*"
-      - key: STORAGE_DIR
-        value: "storage"
-      - key: LIGHTSPEED_RETAILER_ID
+      - key: LIGHTSPEED_PERSONAL_TOKEN
         sync: false
-      - key: LIGHTSPEED_ACCESS_TOKEN
+      - key: LIGHTSPEED_DEFAULT_OUTLET_ID
         sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: DROPBOX_TOKEN
-        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.5"

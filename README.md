@@ -1,69 +1,142 @@
-# A2Z Lightspeed Invoice Backend
+# Lightspeed Invoice Importer
 
-Render-ready FastAPI backend for uploading supplier invoice PDFs and generating a reviewable Lightspeed import CSV.
+FastAPI service that pushes structured invoices into Lightspeed Retail
+(X-Series) as `SUPPLIER` consignments. This is the back half of an invoice
+processing pipeline — bring your own extraction layer.
 
-## What v1 does
+## What it does
 
-- Runs on Render as a Python FastAPI web service
-- Provides `/health` for Render health checks
-- Provides `/docs` interactive API docs
-- Accepts PDF invoice uploads at `/invoices/upload`
-- Extracts text from PDFs with `pypdf`
-- Creates starter Lightspeed CSV output
-- Protects admin endpoints with `X-API-Key`
-- Includes placeholders for Lightspeed Retail X-Series API, UPC lookup, pricing lookup, Dropbox, and OpenAI descriptions
+Given an invoice that's already been parsed into line items + matched to
+Lightspeed product IDs, this service:
 
-## Local setup
+1. Creates a `SUPPLIER` consignment for the supplier
+2. Adds each line item with quantity and unit cost
+3. Optionally walks the consignment through `DISPATCHED` → `RECEIVED`,
+   which is what actually adjusts inventory in Lightspeed
+
+It also exposes lookup endpoints (`/suppliers/lookup`, `/products/lookup`)
+so your extraction layer can resolve supplier names and supplier SKUs to
+Lightspeed IDs before posting an invoice.
+
+## Setup
+
+### 1. Get a Personal Token
+
+In Lightspeed: **Setup → Personal Tokens → Generate new token**. Save it —
+you can't see it again.
+
+You also need your **domain prefix** — it's the subdomain part of your
+Lightspeed URL (`https://YOURSTORE.retail.lightspeed.app` → `YOURSTORE`).
+
+### 2. Find your default outlet ID
+
+Once deployed, hit `GET /outlets` to list outlets and grab the UUID of the
+one invoices default to.
+
+### 3. Environment variables
+
+```
+LIGHTSPEED_DOMAIN_PREFIX=yourstore
+LIGHTSPEED_PERSONAL_TOKEN=...
+LIGHTSPEED_DEFAULT_OUTLET_ID=...   # optional but convenient
+```
+
+### 4. Deploy to Render
+
+Push this repo to GitHub and connect it as a Render web service — the
+`render.yaml` blueprint handles the rest. Add the three env vars in the
+Render dashboard (they're marked `sync: false` so they don't get committed).
+
+## Local development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Mac/Linux
-# Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn main:app --reload
+export LIGHTSPEED_DOMAIN_PREFIX=yourstore
+export LIGHTSPEED_PERSONAL_TOKEN=...
+uvicorn app.main:app --reload
 ```
 
-Open:
+Visit `http://localhost:8000/docs` for the interactive API explorer.
 
-```text
-http://127.0.0.1:8000/docs
+## API
+
+### `POST /invoices/import`
+
+The main endpoint. Pass a fully-matched invoice; get back a consignment.
+
+```json
+{
+  "supplier_invoice_number": "INV-2026-0481",
+  "supplier_id": "0242ac11-0002-11eb-...",
+  "outlet_id": "0242ac12-0002-11e9-...",
+  "receive_immediately": true,
+  "items": [
+    {"product_id": "0242ac12-...", "count": 6, "cost": 12.50},
+    {"product_id": "0242ac13-...", "count": 2, "cost": 45.00}
+  ]
+}
 ```
 
-## Render setup
+Response:
 
-Render settings:
-
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-
-Environment variables:
-
-```text
-ADMIN_API_KEY=make-this-long-and-random
-CORS_ORIGINS=*
-LIGHTSPEED_RETAILER_ID=
-LIGHTSPEED_ACCESS_TOKEN=
-OPENAI_API_KEY=
-DROPBOX_TOKEN=
-STORAGE_DIR=storage
+```json
+{
+  "consignment_id": "0242ac17-...",
+  "status": "RECEIVED",
+  "items_added": 2,
+  "items_failed": 0,
+  "errors": []
+}
 ```
 
-## Test upload with curl
+Set `receive_immediately: false` if you want to leave the consignment in
+`OPEN` for manual review in the Lightspeed UI before receiving.
+
+### `GET /products/lookup?supplier_code=ABC-123`
+
+Resolve a supplier's SKU (what's on the invoice) to a Lightspeed product.
+Prefers `supplier_code`; falls back to `sku` if you pass that instead.
+
+### `GET /suppliers/lookup?name=Acme%20Distribution`
+
+Find a supplier by exact name (case-insensitive).
+
+### `GET /outlets`
+
+List outlets (run once during setup to find your outlet_id).
+
+## Design notes
+
+- **Why supplier_code is the primary match key**: invoices show the
+  supplier's SKU, not yours. Lightspeed products have a `supplier_code`
+  field exactly for this. Make sure your products have it populated.
+
+- **Why we go straight OPEN → DISPATCHED → RECEIVED**: the `SENT` status
+  only exists to mirror "we sent the PO to the supplier" — irrelevant
+  when you're importing an invoice that represents goods already received.
+  Skipping `SENT` is officially supported.
+
+- **Why `cost` matters**: Lightspeed uses the per-unit cost to update the
+  product's supply price and weighted average cost. Getting this right is
+  the whole point of importing invoices via API instead of by hand.
+
+- **Once RECEIVED, quantities are locked.** If you might need to amend a
+  delivery, leave it at `OPEN` and finalize in the UI.
+
+## What's next
+
+The extraction layer. Once you're ready, the flow will be:
+
+1. PDF / email / scan lands in a watched location
+2. Vision LLM extracts supplier name, invoice number, line items
+3. For each line, call `/products/lookup` to resolve supplier_code → product_id
+4. Show unmatched lines in a review UI; save resolved mappings
+5. Once everything is resolved, `POST /invoices/import`
+
+## Tests
 
 ```bash
-curl -X POST "https://YOUR-RENDER-APP.onrender.com/invoices/upload" \
-  -H "X-API-Key: YOUR_ADMIN_API_KEY" \
-  -F "file=@invoice.pdf"
+pytest
 ```
 
-## Next build steps
-
-1. Add supplier-specific parsers:
-   - ReefH2O
-   - Central Pet
-   - Live fish invoices
-2. Add existing inventory upload/matching.
-3. Add real Lightspeed Retail X-Series product push after review approval.
-4. Add a private GoDaddy admin page that calls this backend.
-5. Add persistent database storage. Render's normal filesystem is not permanent between deploys, so production should use Postgres or object storage for invoices/exports.
+Tests mock the Lightspeed HTTP layer so they run offline.
