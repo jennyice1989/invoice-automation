@@ -176,6 +176,24 @@ class LightspeedClient:
         data = await self._request("GET", "/outlets")
         return data.get("data", [])
 
+    async def list_suppliers(self, *, page_size: int = 200) -> list[dict]:
+        """Return all suppliers. Useful for debugging name mismatches and
+        for building a local supplier->id cache in the extraction layer."""
+        data = await self._request(
+            "GET", "/suppliers", params={"page_size": page_size}
+        )
+        return data.get("data", [])
+
+    async def search_suppliers(self, query: str) -> list[dict]:
+        """Substring search over supplier names. Case- and space-insensitive.
+        Returns all suppliers whose name contains the query."""
+        normalized = "".join(query.lower().split())
+        suppliers = await self.list_suppliers()
+        return [
+            s for s in suppliers
+            if normalized in "".join(s.get("name", "").lower().split())
+        ]
+
     async def find_supplier_by_name(self, name: str) -> dict | None:
         """
         Look up a supplier by name. Lightspeed's supplier list is small

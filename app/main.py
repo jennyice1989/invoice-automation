@@ -176,6 +176,35 @@ async def lookup_supplier(name: str) -> SupplierLookupResponse:
     )
 
 
+@app.get("/suppliers/search")
+async def search_suppliers(q: str) -> dict:
+    """Substring search over supplier names. Use this when /lookup
+    returns found:false to see what the supplier is actually named."""
+    try:
+        matches = await _client().search_suppliers(q)
+    except LightspeedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "matches": [
+            {"id": s["id"], "name": s.get("name")} for s in matches
+        ]
+    }
+
+
+@app.get("/suppliers")
+async def list_suppliers() -> dict:
+    """List all suppliers. Useful for first-time inspection."""
+    try:
+        suppliers = await _client().list_suppliers()
+    except LightspeedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "data": [
+            {"id": s["id"], "name": s.get("name")} for s in suppliers
+        ]
+    }
+
+
 @app.get("/products/lookup", response_model=ProductLookupResponse)
 async def lookup_product(
     supplier_code: str | None = None,
