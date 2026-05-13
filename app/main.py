@@ -1,13 +1,12 @@
 """
 FastAPI service that exposes the Lightspeed integration.
 
-Your extraction layer (whatever you build next) hands a structured invoice
-to POST /invoices/import and gets back a consignment id + status.
+Two main flows:
 
-Run locally:
-    uvicorn app.main:app --reload
+  POST /invoices/match     -> raw extracted lines -> matched + unmatched
+  POST /invoices/import    -> fully-matched lines -> Lightspeed consignment
 
-Render uses the `start` command in render.yaml.
+And supporting endpoints for mappings, suppliers, products, outlets.
 """
 
 from __future__ import annotations
@@ -17,9 +16,17 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import (
+    SupplierSkuMapping,
+    init_db,
+    session_scope,
+    upsert_mapping,
+)
 from app.lightspeed import (
     LightspeedAuthError,
     LightspeedClient,
@@ -27,6 +34,7 @@ from app.lightspeed import (
     LightspeedNotFoundError,
     MatchedLineItem,
 )
+from app.matching import MatchingService, RawInvoiceLine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,18 +44,10 @@ logger = logging.getLogger(__name__)
 # Config                                                                #
 # --------------------------------------------------------------------- #
 
-def _required(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        # We don't crash at import — we crash on first use, so the app
-        # still boots for /healthz checks even if secrets aren't wired up.
-        return ""
-    return value
-
-
-LIGHTSPEED_DOMAIN_PREFIX = _required("LIGHTSPEED_DOMAIN_PREFIX")
-LIGHTSPEED_TOKEN = _required("LIGHTSPEED_PERSONAL_TOKEN")
+LIGHTSPEED_DOMAIN_PREFIX = os.environ.get("LIGHTSPEED_DOMAIN_PREFIX", "")
+LIGHTSPEED_TOKEN = os.environ.get("LIGHTSPEED_PERSONAL_TOKEN", "")
 DEFAULT_OUTLET_ID = os.environ.get("LIGHTSPEED_DEFAULT_OUTLET_ID", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 
 # --------------------------------------------------------------------- #
@@ -56,26 +56,32 @@ DEFAULT_OUTLET_ID = os.environ.get("LIGHTSPEED_DEFAULT_OUTLET_ID", "")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Hold a single httpx client for the process lifetime."""
     if LIGHTSPEED_DOMAIN_PREFIX and LIGHTSPEED_TOKEN:
         client = LightspeedClient(LIGHTSPEED_DOMAIN_PREFIX, LIGHTSPEED_TOKEN)
         app.state.lightspeed = client
-        try:
-            yield
-        finally:
-            await client.close()
     else:
-        logger.warning(
-            "LIGHTSPEED_DOMAIN_PREFIX or LIGHTSPEED_PERSONAL_TOKEN missing; "
-            "API calls will fail until configured."
-        )
+        logger.warning("Lightspeed credentials missing")
         app.state.lightspeed = None
+
+    if DATABASE_URL:
+        try:
+            await init_db()
+            logger.info("Database initialized")
+        except Exception as exc:
+            logger.error("DB init failed: %s", exc)
+    else:
+        logger.warning("DATABASE_URL not set; mapping features will fail")
+
+    try:
         yield
+    finally:
+        if app.state.lightspeed:
+            await app.state.lightspeed.close()
 
 
 app = FastAPI(
     title="Invoice -> Lightspeed importer",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -90,19 +96,21 @@ def _client() -> LightspeedClient:
     return client
 
 
+async def _session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency that hands out a transactional session."""
+    async with session_scope() as session:
+        yield session
+
+
 # --------------------------------------------------------------------- #
-# Request / response models                                             #
+# Models                                                                #
 # --------------------------------------------------------------------- #
 
 class LineItemIn(BaseModel):
-    """A line item that has already been matched to a Lightspeed product."""
-
-    product_id: str = Field(..., description="Lightspeed product UUID")
-    count: float = Field(..., gt=0, description="Quantity ordered")
-    cost: float = Field(..., ge=0, description="Per-unit cost from invoice")
-    received: float | None = Field(
-        None, description="Qty actually received; defaults to count on receive"
-    )
+    product_id: str
+    count: float = Field(..., gt=0)
+    cost: float = Field(..., ge=0)
+    received: float | None = None
 
 
 class InvoiceImportRequest(BaseModel):
@@ -110,11 +118,7 @@ class InvoiceImportRequest(BaseModel):
     items: list[LineItemIn]
     supplier_id: str | None = None
     outlet_id: str | None = None
-    receive_immediately: bool = Field(
-        False,
-        description="If true, marks consignment RECEIVED in one call. "
-                    "Use when invoice represents goods already in hand.",
-    )
+    receive_immediately: bool = False
     name: str | None = None
 
 
@@ -140,26 +144,97 @@ class ProductLookupResponse(BaseModel):
     matched_by: str | None
 
 
+class RawLineIn(BaseModel):
+    supplier_code: str | None = None
+    description: str | None = None
+    barcode: str | None = None
+    quantity: float = Field(..., gt=0)
+    unit_cost: float = Field(..., ge=0)
+
+
+class InvoiceMatchRequest(BaseModel):
+    supplier_id: str
+    lines: list[RawLineIn]
+
+
+class MatchedLineOut(BaseModel):
+    supplier_code: str | None
+    description: str | None
+    quantity: float
+    unit_cost: float
+    product_id: str
+    product_sku: str | None
+    product_name: str | None
+    matched_by: str
+    confidence: float
+
+
+class UnmatchedLineOut(BaseModel):
+    supplier_code: str | None
+    description: str | None
+    quantity: float
+    unit_cost: float
+    candidates: list[dict]
+    reason: str
+
+
+class MatchResponse(BaseModel):
+    matched: list[MatchedLineOut]
+    unmatched: list[UnmatchedLineOut]
+    summary: dict
+
+
+class MappingCreate(BaseModel):
+    supplier_id: str
+    supplier_code: str
+    lightspeed_product_id: str
+    lightspeed_sku: str | None = None
+    product_name: str | None = None
+
+
+class MappingOut(BaseModel):
+    id: int
+    supplier_id: str
+    supplier_code: str
+    lightspeed_product_id: str
+    lightspeed_sku: str | None
+    product_name: str | None
+
+
 # --------------------------------------------------------------------- #
-# Routes                                                                #
+# Health and discovery                                                  #
 # --------------------------------------------------------------------- #
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "configured": bool(LIGHTSPEED_DOMAIN_PREFIX)}
+    return {
+        "ok": True,
+        "lightspeed_configured": bool(LIGHTSPEED_DOMAIN_PREFIX),
+        "db_configured": bool(DATABASE_URL),
+    }
 
 
 @app.get("/outlets")
 async def list_outlets() -> dict:
-    """List outlets so you can find the right outlet_id for imports."""
     try:
         outlets = await _client().list_outlets()
     except LightspeedError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"data": [{"id": o["id"], "name": o.get("name")} for o in outlets]}
+
+
+# --------------------------------------------------------------------- #
+# Suppliers                                                             #
+# --------------------------------------------------------------------- #
+
+@app.get("/suppliers")
+async def list_suppliers() -> dict:
+    try:
+        suppliers = await _client().list_suppliers()
+    except LightspeedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
-        "data": [
-            {"id": o["id"], "name": o.get("name")} for o in outlets
-        ]
+        "data": [{"id": s["id"], "name": s.get("name")} for s in suppliers]
     }
 
 
@@ -178,48 +253,27 @@ async def lookup_supplier(name: str) -> SupplierLookupResponse:
 
 @app.get("/suppliers/search")
 async def search_suppliers(q: str) -> dict:
-    """Substring search over supplier names. Use this when /lookup
-    returns found:false to see what the supplier is actually named."""
     try:
         matches = await _client().search_suppliers(q)
     except LightspeedError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
-        "matches": [
-            {"id": s["id"], "name": s.get("name")} for s in matches
-        ]
+        "matches": [{"id": s["id"], "name": s.get("name")} for s in matches]
     }
 
 
-@app.get("/suppliers")
-async def list_suppliers() -> dict:
-    """List all suppliers. Useful for first-time inspection."""
-    try:
-        suppliers = await _client().list_suppliers()
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {
-        "data": [
-            {"id": s["id"], "name": s.get("name")} for s in suppliers
-        ]
-    }
-
+# --------------------------------------------------------------------- #
+# Products                                                              #
+# --------------------------------------------------------------------- #
 
 @app.get("/products/lookup", response_model=ProductLookupResponse)
 async def lookup_product(
     supplier_code: str | None = None,
     sku: str | None = None,
 ) -> ProductLookupResponse:
-    """
-    Look up a product, preferring supplier_code (what's on the invoice).
-
-    Falls back to SKU if no supplier_code is given. This is the endpoint
-    your extraction layer will hammer to match invoice lines to products.
-    """
     if not (supplier_code or sku):
         raise HTTPException(
-            status_code=400,
-            detail="Pass either supplier_code or sku",
+            status_code=400, detail="Pass either supplier_code or sku"
         )
 
     client = _client()
@@ -249,14 +303,143 @@ async def lookup_product(
     )
 
 
+# --------------------------------------------------------------------- #
+# Matching                                                              #
+# --------------------------------------------------------------------- #
+
+@app.post("/invoices/match", response_model=MatchResponse)
+async def match_invoice(
+    req: InvoiceMatchRequest,
+    session: AsyncSession = Depends(_session),
+) -> MatchResponse:
+    """
+    Resolve raw invoice lines to Lightspeed products.
+
+    Returns separate matched/unmatched lists. Unmatched lines come with
+    up to 3 fuzzy-match candidates so a UI can suggest them.
+    """
+    service = MatchingService(_client(), session)
+    raw_lines = [
+        RawInvoiceLine(
+            supplier_code=l.supplier_code,
+            description=l.description,
+            barcode=l.barcode,
+            quantity=l.quantity,
+            unit_cost=l.unit_cost,
+        )
+        for l in req.lines
+    ]
+    result = await service.match_invoice(req.supplier_id, raw_lines)
+
+    matched_out = [
+        MatchedLineOut(
+            supplier_code=m.raw.supplier_code,
+            description=m.raw.description,
+            quantity=m.raw.quantity,
+            unit_cost=m.raw.unit_cost,
+            product_id=m.product_id,
+            product_sku=m.product_sku,
+            product_name=m.product_name,
+            matched_by=m.matched_by,
+            confidence=m.confidence,
+        )
+        for m in result.matched
+    ]
+    unmatched_out = [
+        UnmatchedLineOut(
+            supplier_code=u.raw.supplier_code,
+            description=u.raw.description,
+            quantity=u.raw.quantity,
+            unit_cost=u.raw.unit_cost,
+            candidates=u.candidates,
+            reason=u.reason,
+        )
+        for u in result.unmatched
+    ]
+
+    return MatchResponse(
+        matched=matched_out,
+        unmatched=unmatched_out,
+        summary={
+            "total_lines": len(req.lines),
+            "matched_count": len(matched_out),
+            "unmatched_count": len(unmatched_out),
+            "by_method": _count_by(matched_out, "matched_by"),
+        },
+    )
+
+
+def _count_by(items, attr: str) -> dict:
+    counts: dict = {}
+    for item in items:
+        key = getattr(item, attr)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+# --------------------------------------------------------------------- #
+# Mappings (the "memory")                                               #
+# --------------------------------------------------------------------- #
+
+@app.post("/mappings", response_model=MappingOut)
+async def create_mapping(
+    body: MappingCreate,
+    session: AsyncSession = Depends(_session),
+) -> MappingOut:
+    """
+    Teach the system: 'when supplier X sends code Y, that's product Z.'
+    Idempotent — calling twice with the same supplier+code updates the
+    existing mapping rather than failing.
+    """
+    mapping = await upsert_mapping(
+        session,
+        supplier_id=body.supplier_id,
+        supplier_code=body.supplier_code,
+        lightspeed_product_id=body.lightspeed_product_id,
+        lightspeed_sku=body.lightspeed_sku,
+        product_name=body.product_name,
+    )
+    await session.flush()
+    return MappingOut(
+        id=mapping.id,
+        supplier_id=mapping.supplier_id,
+        supplier_code=mapping.supplier_code,
+        lightspeed_product_id=mapping.lightspeed_product_id,
+        lightspeed_sku=mapping.lightspeed_sku,
+        product_name=mapping.product_name,
+    )
+
+
+@app.get("/mappings")
+async def list_mappings(
+    supplier_id: str | None = None,
+    session: AsyncSession = Depends(_session),
+) -> dict:
+    stmt = select(SupplierSkuMapping).order_by(SupplierSkuMapping.id.desc())
+    if supplier_id:
+        stmt = stmt.where(SupplierSkuMapping.supplier_id == supplier_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    return {
+        "data": [
+            {
+                "id": m.id,
+                "supplier_id": m.supplier_id,
+                "supplier_code": m.supplier_code,
+                "lightspeed_product_id": m.lightspeed_product_id,
+                "lightspeed_sku": m.lightspeed_sku,
+                "product_name": m.product_name,
+            }
+            for m in rows
+        ]
+    }
+
+
+# --------------------------------------------------------------------- #
+# Import (final stage)                                                  #
+# --------------------------------------------------------------------- #
+
 @app.post("/invoices/import", response_model=InvoiceImportResponse)
 async def import_invoice(req: InvoiceImportRequest) -> InvoiceImportResponse:
-    """
-    Push a fully-matched invoice into Lightspeed as a SUPPLIER consignment.
-
-    The caller is responsible for having resolved every line item to a
-    Lightspeed product_id. Use /products/lookup to do that resolution.
-    """
     outlet_id = req.outlet_id or DEFAULT_OUTLET_ID
     if not outlet_id:
         raise HTTPException(

@@ -1,78 +1,75 @@
 # Lightspeed Invoice Importer
 
-FastAPI service that pushes structured invoices into Lightspeed Retail
-(X-Series) as `SUPPLIER` consignments. This is the back half of an invoice
-processing pipeline — bring your own extraction layer.
+FastAPI service that takes structured invoice data and pushes it into
+Lightspeed Retail (X-Series) as `SUPPLIER` consignments — with a smart
+matching layer that learns supplier-code-to-SKU mappings over time.
 
 ## What it does
 
-Given an invoice that's already been parsed into line items + matched to
-Lightspeed product IDs, this service:
+Three stages:
 
-1. Creates a `SUPPLIER` consignment for the supplier
-2. Adds each line item with quantity and unit cost
-3. Optionally walks the consignment through `DISPATCHED` → `RECEIVED`,
-   which is what actually adjusts inventory in Lightspeed
+1. **Match** — `POST /invoices/match` takes raw invoice lines (supplier
+   code, description, barcode, qty, cost) and resolves them to Lightspeed
+   products via a tiered strategy: saved mapping → exact SKU → barcode →
+   fuzzy name match. Anything that doesn't resolve confidently lands in
+   an "unmatched" list with candidate suggestions.
 
-It also exposes lookup endpoints (`/suppliers/lookup`, `/products/lookup`)
-so your extraction layer can resolve supplier names and supplier SKUs to
-Lightspeed IDs before posting an invoice.
+2. **Teach** — `POST /mappings` saves a resolution permanently. Once you
+   tell it that ReefH2O's `RH2-CAL-2KG` is your `CAL2KG`, that mapping
+   fires automatically forever. The unknown rate trends toward zero.
+
+3. **Import** — `POST /invoices/import` takes fully-matched line items
+   and creates a `SUPPLIER` consignment in Lightspeed. Optionally walks
+   it through `DISPATCHED → RECEIVED`, which is what actually adjusts
+   inventory.
 
 ## Setup
 
-### 1. Get a Personal Token
+### 1. Lightspeed Personal Token
 
-In Lightspeed: **Setup → Personal Tokens → Generate new token**. Save it —
-you can't see it again.
+In Lightspeed: **Setup → Personal Tokens → Generate new token**. Save it.
 
-You also need your **domain prefix** — it's the subdomain part of your
-Lightspeed URL (`https://YOURSTORE.retail.lightspeed.app` → `YOURSTORE`).
+Your **domain prefix** is the subdomain of your Lightspeed URL
+(`https://YOURSTORE.retail.lightspeed.app` → `YOURSTORE`).
 
-### 2. Find your default outlet ID
+### 2. Deploy to Render
 
-Once deployed, hit `GET /outlets` to list outlets and grab the UUID of the
-one invoices default to.
+Push to GitHub, point Render at the repo, accept the blueprint. Render
+creates the Postgres database and wires `DATABASE_URL` automatically.
 
-### 3. Environment variables
+Add these env vars in the Render dashboard:
 
 ```
 LIGHTSPEED_DOMAIN_PREFIX=yourstore
 LIGHTSPEED_PERSONAL_TOKEN=...
-LIGHTSPEED_DEFAULT_OUTLET_ID=...   # optional but convenient
+LIGHTSPEED_DEFAULT_OUTLET_ID=...   # find via GET /outlets after first deploy
 ```
 
-### 4. Deploy to Render
+### 3. Verify
 
-Push this repo to GitHub and connect it as a Render web service — the
-`render.yaml` blueprint handles the rest. Add the three env vars in the
-Render dashboard (they're marked `sync: false` so they don't get committed).
-
-## Local development
-
-```bash
-pip install -r requirements.txt
-export LIGHTSPEED_DOMAIN_PREFIX=yourstore
-export LIGHTSPEED_PERSONAL_TOKEN=...
-uvicorn app.main:app --reload
+```
+GET /healthz              -> {"ok": true, "lightspeed_configured": true, "db_configured": true}
+GET /outlets              -> list of your outlets
+GET /suppliers            -> list of your suppliers
 ```
 
-Visit `http://localhost:8000/docs` for the interactive API explorer.
+## Endpoints
 
-## API
+### Matching
 
-### `POST /invoices/import`
-
-The main endpoint. Pass a fully-matched invoice; get back a consignment.
+`POST /invoices/match`
 
 ```json
 {
-  "supplier_invoice_number": "INV-2026-0481",
-  "supplier_id": "0242ac11-0002-11eb-...",
-  "outlet_id": "0242ac12-0002-11e9-...",
-  "receive_immediately": true,
-  "items": [
-    {"product_id": "0242ac12-...", "count": 6, "cost": 12.50},
-    {"product_id": "0242ac13-...", "count": 2, "cost": 45.00}
+  "supplier_id": "54e3df0b-b969-4626-8ad7-1cbc4f347d3c",
+  "lines": [
+    {
+      "supplier_code": "RH2-CAL-2KG",
+      "description": "Reef Calcium Supplement 2kg",
+      "barcode": "0123456789012",
+      "quantity": 6,
+      "unit_cost": 12.50
+    }
   ]
 }
 ```
@@ -81,57 +78,110 @@ Response:
 
 ```json
 {
-  "consignment_id": "0242ac17-...",
-  "status": "RECEIVED",
-  "items_added": 2,
-  "items_failed": 0,
-  "errors": []
+  "matched": [{
+    "supplier_code": "RH2-CAL-2KG",
+    "product_id": "...",
+    "product_sku": "CAL2KG",
+    "product_name": "Reef Calcium 2kg",
+    "matched_by": "sku",
+    "confidence": 1.0,
+    "quantity": 6,
+    "unit_cost": 12.50
+  }],
+  "unmatched": [],
+  "summary": {"total_lines": 1, "matched_count": 1, "unmatched_count": 0,
+              "by_method": {"sku": 1}}
 }
 ```
 
-Set `receive_immediately: false` if you want to leave the consignment in
-`OPEN` for manual review in the Lightspeed UI before receiving.
+For unmatched lines, you get up to 3 fuzzy-match candidates so a UI can
+suggest options. Pick one, teach the system via `POST /mappings`, and the
+next invoice from that supplier will hit instantly.
 
-### `GET /products/lookup?supplier_code=ABC-123`
+### Teaching mappings
 
-Resolve a supplier's SKU (what's on the invoice) to a Lightspeed product.
-Prefers `supplier_code`; falls back to `sku` if you pass that instead.
+`POST /mappings`
 
-### `GET /suppliers/lookup?name=Acme%20Distribution`
+```json
+{
+  "supplier_id": "54e3df0b-b969-4626-8ad7-1cbc4f347d3c",
+  "supplier_code": "RH2-CAL-2KG",
+  "lightspeed_product_id": "0683d884-602d-...",
+  "lightspeed_sku": "CAL2KG",
+  "product_name": "Reef Calcium 2kg"
+}
+```
 
-Find a supplier by exact name (case-insensitive).
+Idempotent: re-posting the same `supplier_id + supplier_code` updates the
+existing mapping.
 
-### `GET /outlets`
+`GET /mappings?supplier_id=...` lists what you've taught it.
 
-List outlets (run once during setup to find your outlet_id).
+### Importing
 
-## Design notes
+`POST /invoices/import`
 
-- **Why supplier_code is the primary match key**: invoices show the
-  supplier's SKU, not yours. Lightspeed products have a `supplier_code`
-  field exactly for this. Make sure your products have it populated.
+```json
+{
+  "supplier_invoice_number": "INV-2026-0481",
+  "supplier_id": "54e3df0b-...",
+  "receive_immediately": true,
+  "items": [
+    {"product_id": "...", "count": 6, "cost": 12.50}
+  ]
+}
+```
 
-- **Why we go straight OPEN → DISPATCHED → RECEIVED**: the `SENT` status
-  only exists to mirror "we sent the PO to the supplier" — irrelevant
-  when you're importing an invoice that represents goods already received.
-  Skipping `SENT` is officially supported.
+`receive_immediately: false` leaves the consignment in `OPEN` for review
+in the Lightspeed UI before receiving. **Once `RECEIVED`, quantities are
+locked**, so default to `false` until you trust your extraction.
 
-- **Why `cost` matters**: Lightspeed uses the per-unit cost to update the
-  product's supply price and weighted average cost. Getting this right is
-  the whole point of importing invoices via API instead of by hand.
+### Discovery / debugging
 
-- **Once RECEIVED, quantities are locked.** If you might need to amend a
-  delivery, leave it at `OPEN` and finalize in the UI.
+- `GET /outlets` — list outlets (run once during setup)
+- `GET /suppliers` — list all suppliers
+- `GET /suppliers/search?q=reef` — substring search, space-insensitive
+- `GET /suppliers/lookup?name=ReefH2O` — exact-match lookup
+- `GET /products/lookup?sku=CAL2KG` — exact SKU lookup
+- `GET /consignments/{id}` — check status of a consignment you created
 
-## What's next
+## Matching strategy
 
-The extraction layer. Once you're ready, the flow will be:
+Lines flow through tiers in order; first hit wins:
 
-1. PDF / email / scan lands in a watched location
-2. Vision LLM extracts supplier name, invoice number, line items
-3. For each line, call `/products/lookup` to resolve supplier_code → product_id
-4. Show unmatched lines in a review UI; save resolved mappings
-5. Once everything is resolved, `POST /invoices/import`
+1. **Saved mapping** (confidence 1.0) — supplier_id + supplier_code seen before
+2. **Exact SKU** (confidence 1.0) — supplier_code matches a Lightspeed SKU
+3. **Barcode** (confidence 1.0) — barcode matches a product's barcode field
+4. **Fuzzy name** (confidence 0.85+) — description matches product name above threshold
+
+Anything below the fuzzy threshold returns `unmatched` with top-3 candidates.
+
+The fuzzy threshold (`FUZZY_MATCH_THRESHOLD` in `app/matching.py`) defaults
+to 0.85. Lower it for noisier invoices; raise it for stricter matching.
+
+## Workflow for a new supplier
+
+First invoice from a new supplier will mostly land in `unmatched`. For each:
+
+1. Look at the candidates returned with the unmatched line
+2. If one is right, `POST /mappings` to save it
+3. Re-run `POST /invoices/match` — it'll now resolve via the saved mapping
+4. Repeat until everything matches, then `POST /invoices/import`
+
+Second invoice from the same supplier should be ~100% auto-matched if
+their SKU scheme is consistent.
+
+## Local development
+
+```bash
+pip install -r requirements.txt
+export LIGHTSPEED_DOMAIN_PREFIX=yourstore
+export LIGHTSPEED_PERSONAL_TOKEN=...
+export DATABASE_URL=postgresql://localhost/invoice_importer
+uvicorn app.main:app --reload
+```
+
+Visit `http://localhost:8000/docs` for the interactive API explorer.
 
 ## Tests
 
@@ -139,4 +189,4 @@ The extraction layer. Once you're ready, the flow will be:
 pytest
 ```
 
-Tests mock the Lightspeed HTTP layer so they run offline.
+Tests mock the Lightspeed HTTP layer; they run offline.
