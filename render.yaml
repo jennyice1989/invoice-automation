@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: a2z-lightspeed-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ADMIN_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: STORAGE_DIR
+        value: "storage"
+      - key: LIGHTSPEED_RETAILER_ID
+        sync: false
+      - key: LIGHTSPEED_ACCESS_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DROPBOX_TOKEN
+        sync: false
