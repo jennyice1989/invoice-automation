@@ -67,4 +67,3 @@ curl -X POST "https://YOUR-RENDER-APP.onrender.com/invoices/upload" \
 3. Add real Lightspeed Retail X-Series product push after review approval.
 4. Add a private GoDaddy admin page that calls this backend.
 5. Add persistent database storage. Render's normal filesystem is not permanent between deploys, so production should use Postgres or object storage for invoices/exports.
-# invoice-automation
