@@ -83,6 +83,7 @@ input[type=text], input[type=password], input[type=number] {
 
 _NAV = """<nav>
 <a href="/" id="nav-home">Upload</a>
+<a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
 <span class="grow"></span>
@@ -506,6 +507,11 @@ function renderUncertainRow(u, i, locked) {
   } else if (dec && dec.decision === 'match_existing') {
     controls = '<small>✓ Matched to <strong>' + escape(dec._name) + '</strong></small>'
             + ' <button class="cand-btn" onclick="clearDecision(' + i + ')">change</button>';
+  } else if (dec && dec.decision === 'queue_enrich') {
+    controls = '<small>✓ Will create new product after enrichment'
+            + (dec.kind_hint ? ' (' + dec.kind_hint.replace('_',' ') + ')' : '')
+            + '</small>'
+            + ' <button class="cand-btn" onclick="clearDecision(' + i + ')">change</button>';
   } else if (dec && dec.decision === 'create_new') {
     controls = '<small>✓ Will create new product: <strong>' + escape(dec.new_product_name) + '</strong>'
             + ' @ $' + (dec.new_retail_price != null ? dec.new_retail_price.toFixed(2) : '—') + '</small>'
@@ -574,20 +580,25 @@ async function openSearch(i) {
 }
 
 function openCreateNew(i) {
+  // Queue this line for enrichment. The actual product creation happens
+  // on the enrichment review screen after finalize.
   const u = DATA.data.uncertain[i];
-  const name = prompt('Product name:', u.description || '');
-  if (!name) return;
-  const sku = prompt('SKU (leave blank for none):', u.supplier_code || '');
-  let retail = u.suggested_retail_price;
-  const retailStr = prompt('Retail price:', retail != null ? retail.toFixed(2) : '');
-  retail = parseFloat(retailStr);
-  if (isNaN(retail)) retail = null;
+  const kindHint = prompt(
+    'Type? Press Enter to auto-detect. Otherwise type "dry" for dry good '
+    + 'or "fish" for live fish:',
+    ''
+  );
+  let normalized = null;
+  if (kindHint) {
+    const t = kindHint.trim().toLowerCase();
+    if (t.startsWith('d') || t === 'dry_good') normalized = 'dry_good';
+    else if (t.startsWith('f') || t === 'live_fish') normalized = 'live_fish';
+  }
   DECISIONS[i] = {
-    decision: 'create_new',
+    decision: 'queue_enrich',
     supplier_code: u.supplier_code, description: u.description,
     barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
-    new_product_name: name, new_product_sku: sku || null,
-    new_retail_price: retail,
+    kind_hint: normalized,
   };
   render();
 }
@@ -636,15 +647,35 @@ async function finalize() {
     const data = await resp.json();
     const out = document.getElementById('finalResult');
     if (resp.ok) {
-      let h = '<div class="success">✓ Imported as <code>' + escape(data.consignment_id)
-            + '</code> (' + data.status + ', ' + data.items_added + ' items)';
+      let h = '<div class="success">';
+      if (data.consignment_id) {
+        h += '✓ Pushed to Lightspeed as consignment <code>' +
+             escape(data.consignment_id) + '</code> (' + data.status + ', ' +
+             data.items_added + ' items)';
+      } else {
+        h += '✓ Invoice finalized.';
+      }
       if (data.products_created.length) h += '<br>Created ' + data.products_created.length + ' new products.';
       if (data.products_updated.length) h += '<br>Updated ' + data.products_updated.length + ' existing products.';
+      if (data.queued_for_enrichment_count > 0) {
+        h += '<br><strong>' + data.queued_for_enrichment_count
+          + ' new product(s) queued for enrichment.</strong> '
+          + 'These will be added to the consignment once you approve each draft. '
+          + '<a href="' + data.enrichment_redirect + '" class="primary" '
+          + 'style="display:inline-block;margin-top:8px;text-decoration:none;'
+          + 'color:white;padding:6px 12px;border-radius:4px">'
+          + 'Go to enrichment review →</a>';
+      }
       if (data.errors.length) h += '<br><strong>Errors:</strong><ul>' +
         data.errors.map(e => '<li>' + escape(e) + '</li>').join('') + '</ul>';
       h += '</div>';
       out.innerHTML = h;
-      setTimeout(() => location.reload(), 1500);
+      if (data.queued_for_enrichment_count > 0) {
+        // Auto-redirect after a moment if there's enrichment to do
+        setTimeout(() => { location.href = data.enrichment_redirect; }, 3000);
+      } else {
+        setTimeout(() => location.reload(), 1500);
+      }
     } else {
       out.innerHTML = '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
       btn.disabled = false; btn.textContent = 'Retry';
@@ -853,5 +884,477 @@ function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => 
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 loadRules(); loadSuppliers();
+</script>
+</body></html>"""
+
+
+ENRICH_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Add products</title>
+<style>""" + _COMMON_CSS + """
+textarea { width: 100%; min-height: 180px; font: inherit;
+           padding: 12px; border: 1px solid var(--border);
+           border-radius: 6px; resize: vertical; }
+.hint { font-size: 13px; color: var(--muted); margin: 8px 0; }
+.kind-pick { display: flex; gap: 8px; margin: 12px 0; }
+.kind-pick label { display: flex; align-items: center; gap: 6px;
+                   font-size: 13px; cursor: pointer; }
+.recent { margin-top: 32px; }
+.recent table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.recent td, .recent th { padding: 8px 12px; border-bottom: 1px solid var(--border);
+                         text-align: left; }
+.recent tr.row:hover { background: var(--accent-soft); cursor: pointer; }
+.progress-bar { height: 6px; background: var(--border); border-radius: 3px;
+                overflow: hidden; width: 120px; display: inline-block;
+                vertical-align: middle; }
+.progress-fill { height: 100%; background: var(--good); }
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-enrich">Add products<', 'id="nav-enrich" class="active">Add products<') + """
+  <h1>Add products to catalog</h1>
+  <p class="subtitle">Paste product names. We draft descriptions for dry goods
+  and full care profiles for live fish, then you review before creating
+  them in Lightspeed.</p>
+
+  <div class="card">
+    <h2>Product names</h2>
+    <p class="hint">One product per line. For live fish, use the species name
+    (common or scientific). You'll be able to fix the type per-product on the
+    next screen if we guess wrong.</p>
+    <textarea id="names" placeholder="API Quick Start 16oz&#10;Fluval 307 Canister Filter&#10;Electric Blue Acara&#10;Amano Shrimp&#10;Seachem Prime 500ml"></textarea>
+    <div class="kind-pick">
+      <span style="font-size:13px;color:var(--muted)">Type hint for all:</span>
+      <label><input type="radio" name="kind" value="" checked /> Auto-detect each</label>
+      <label><input type="radio" name="kind" value="dry_good" /> All dry goods</label>
+      <label><input type="radio" name="kind" value="live_fish" /> All live fish</label>
+    </div>
+    <button class="primary" id="goBtn" onclick="submitBatch()">Draft these products</button>
+    <div id="status" style="margin-top:12px"></div>
+  </div>
+
+  <div class="recent">
+    <h2>Recent batches</h2>
+    <div class="card">
+      <table id="batches">
+        <thead><tr><th>When</th><th>Products</th><th>Progress</th></tr></thead>
+        <tbody><tr><td colspan="3" style="color:var(--muted)">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+async function submitBatch() {
+  const raw = document.getElementById('names').value;
+  const names = raw.split('\\n').map(s => s.trim()).filter(Boolean);
+  if (!names.length) { showStatus('Enter at least one product name.', 'error'); return; }
+  if (names.length > 100) { showStatus('Max 100 products per batch.', 'error'); return; }
+  const kind = document.querySelector('input[name=kind]:checked').value || null;
+
+  showStatus('<span class="spinner"></span>Drafting ' + names.length +
+    ' product(s)... this can take a minute or two for large batches.');
+  document.getElementById('goBtn').disabled = true;
+
+  const items = names.map(n => ({ name: n, kind_hint: kind }));
+  try {
+    const resp = await fetch('/enrich/batch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ items }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showStatus('Error: ' + (data.detail || resp.statusText), 'error');
+      document.getElementById('goBtn').disabled = false;
+      return;
+    }
+    window.location.href = data.redirect;
+  } catch (err) {
+    showStatus('Network error: ' + err.message, 'error');
+    document.getElementById('goBtn').disabled = false;
+  }
+}
+function showStatus(html, kind) {
+  const el = document.getElementById('status');
+  el.innerHTML = html;
+  el.className = kind || '';
+}
+async function loadBatches() {
+  const resp = await fetch('/enrich/batches');
+  const data = await resp.json();
+  const tb = document.querySelector('#batches tbody');
+  if (!data.data.length) {
+    tb.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No batches yet.</td></tr>';
+    return;
+  }
+  tb.innerHTML = '';
+  for (const b of data.data) {
+    const done = b.created + b.skipped;
+    const pct = b.total ? Math.round(done / b.total * 100) : 0;
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    tr.onclick = () => window.location = '/enrich/review/' + b.batch_id;
+    tr.innerHTML =
+      '<td>' + new Date(b.created_at).toLocaleString() + '</td>' +
+      '<td>' + b.total + ' (' + b.created + ' created, ' + b.draft + ' pending)</td>' +
+      '<td><span class="progress-bar"><span class="progress-fill" style="width:' +
+        pct + '%"></span></span> ' + pct + '%</td>';
+    tb.appendChild(tr);
+  }
+}
+loadBatches();
+</script>
+</body></html>"""
+
+
+ENRICH_REVIEW_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Review products</title>
+<style>""" + _COMMON_CSS + """
+.draft-card { background: white; border: 1px solid var(--border);
+              border-radius: 8px; padding: 16px 20px; margin-bottom: 12px; }
+.draft-card.created { opacity: 0.55; }
+.draft-card.skipped { opacity: 0.4; }
+.draft-head { display: flex; align-items: center; gap: 10px;
+              margin-bottom: 12px; flex-wrap: wrap; }
+.draft-head h3 { margin: 0; font-size: 15px; }
+.draft-head .grow { flex: 1; }
+.kind-badge { font-size: 11px; padding: 2px 8px; border-radius: 4px;
+              font-weight: 600; text-transform: uppercase; }
+.kind-badge.dry_good { background: #dbeafe; color: #1e40af; }
+.kind-badge.live_fish { background: #d1fae5; color: #065f46; }
+.kind-badge.unknown { background: #fef3c7; color: #92400e; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+.fields .full { grid-column: 1 / -1; }
+.field label { display: block; font-size: 11px; color: var(--muted);
+               text-transform: uppercase; letter-spacing: 0.03em;
+               margin-bottom: 2px; }
+.field input, .field textarea, .field select {
+  width: 100%; font: inherit; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.field textarea { min-height: 60px; resize: vertical; }
+.field.uncertain input, .field.uncertain textarea {
+  border-color: #f59e0b; background: #fffbeb;
+}
+.uncertain-tag { font-size: 10px; color: var(--warn); font-weight: 600; }
+.draft-actions { display: flex; gap: 8px; margin-top: 12px;
+                 padding-top: 12px; border-top: 1px solid var(--border); }
+.draft-actions .grow { flex: 1; }
+.fish-section { grid-column: 1/-1; border-top: 1px dashed var(--border);
+                margin-top: 6px; padding-top: 10px; }
+.fish-section h4 { margin: 0 0 8px; font-size: 12px; color: var(--muted);
+                   text-transform: uppercase; }
+.warn-row { background: var(--warn-bg); border: 1px solid #fde68a;
+            color: var(--warn); padding: 6px 10px; border-radius: 4px;
+            font-size: 12px; margin-bottom: 8px; }
+.batch-bar { display: flex; align-items: center; gap: 12px;
+             margin-bottom: 20px; padding: 12px 16px; background: white;
+             border: 1px solid var(--border); border-radius: 8px; }
+.batch-bar .grow { flex: 1; }
+.save-flash { font-size: 12px; color: var(--good); margin-left: 8px; }
+</style></head><body>
+<div class="container">
+""" + _NAV + """
+  <h1>Review drafted products</h1>
+  <p class="subtitle">Edit anything that's wrong. UPC and photo are manual.
+  Yellow fields are ones Claude flagged as uncertain. Create pushes the
+  product to Lightspeed.</p>
+  <div id="content"><p style="color:var(--muted)">Loading...</p></div>
+</div>
+<script>
+const BATCH_ID = "{{BATCH_ID}}";
+let DRAFTS = [];
+let SUPPLIERS = [];
+
+(async () => {
+  try {
+    const [batchResp, supResp] = await Promise.all([
+      fetch('/enrich/batch/' + BATCH_ID),
+      fetch('/suppliers'),
+    ]);
+    const batchData = await batchResp.json();
+    if (!batchResp.ok) {
+      document.getElementById('content').innerHTML =
+        '<div class="error">' + escape(batchData.detail || 'Failed to load') + '</div>';
+      return;
+    }
+    DRAFTS = batchData.drafts;
+    if (supResp.ok) SUPPLIERS = (await supResp.json()).data || [];
+    render();
+  } catch (err) {
+    document.getElementById('content').innerHTML =
+      '<div class="error">Network error: ' + escape(err.message) + '</div>';
+  }
+})();
+
+function render() {
+  const pending = DRAFTS.filter(d => d.status === 'DRAFT').length;
+  const drafting = DRAFTS.filter(d => d.status === 'PENDING_ENRICH').length;
+  const created = DRAFTS.filter(d => d.status === 'CREATED').length;
+  const skipped = DRAFTS.filter(d => d.status === 'SKIPPED').length;
+
+  let html = '<div class="batch-bar">'
+    + '<strong>' + DRAFTS.length + ' products</strong>'
+    + '<span style="color:var(--muted)">· ' + created + ' created · '
+    + skipped + ' skipped · ' + pending + ' pending'
+    + (drafting > 0 ? ' · <span class="spinner"></span>' + drafting + ' drafting' : '')
+    + '</span>'
+    + '<span class="grow"></span>'
+    + (pending > 0
+        ? '<button class="primary" onclick="createAll()">Create all ' + pending + ' pending</button>'
+        : drafting > 0
+        ? '<span style="color:var(--muted)">Waiting for drafts...</span>'
+        : '<span style="color:var(--good)">All done</span>')
+    + '</div>';
+
+  for (const d of DRAFTS) {
+    html += renderDraft(d);
+  }
+  document.getElementById('content').innerHTML = html;
+
+  // Auto-refresh while anything is still drafting
+  if (drafting > 0) {
+    clearTimeout(window._refreshTimer);
+    window._refreshTimer = setTimeout(refreshDrafts, 4000);
+  }
+}
+
+async function refreshDrafts() {
+  try {
+    const resp = await fetch('/enrich/batch/' + BATCH_ID);
+    if (resp.ok) {
+      const data = await resp.json();
+      DRAFTS = data.drafts;
+      render();
+    }
+  } catch (err) { console.warn('refresh failed', err); }
+}
+
+function supplierOptions(selected) {
+  let opts = '<option value="">— none —</option>';
+  for (const s of SUPPLIERS) {
+    opts += '<option value="' + s.id + '"' +
+      (s.id === selected ? ' selected' : '') + '>' + escape(s.name) + '</option>';
+  }
+  return opts;
+}
+
+function renderDraft(d) {
+  const locked = d.status !== 'DRAFT';
+  const cls = d.status === 'CREATED' ? 'created'
+            : d.status === 'SKIPPED' ? 'skipped'
+            : d.status === 'PENDING_ENRICH' ? 'skipped'
+            : '';
+  const uncertain = (d.fish_profile && d.fish_profile.uncertain_fields) || [];
+
+  let html = '<div class="draft-card ' + cls + '" id="draft-' + d.id + '">';
+  html += '<div class="draft-head">'
+    + '<span class="kind-badge ' + d.kind + '">' +
+        (d.kind === 'live_fish' ? 'Live fish' : d.kind === 'dry_good' ? 'Dry good' : 'Unknown') +
+      '</span>'
+    + '<h3>' + escape(d.input_name) + '</h3>'
+    + (d.source_invoice_id
+        ? '<small style="color:var(--muted)">from invoice '
+          + '<a href="/review/' + d.source_invoice_id + '">#' + d.source_invoice_id
+          + '</a>' + (d.source_quantity ? ' · qty ' + d.source_quantity : '') + '</small>'
+        : '')
+    + '<span class="grow"></span>'
+    + (d.status === 'PENDING_ENRICH'
+        ? '<span style="color:var(--muted);font-size:13px"><span class="spinner"></span>Drafting...</span>'
+        : d.status === 'CREATED'
+        ? '<span style="color:var(--good);font-size:13px">✓ Created</span>'
+        : d.status === 'SKIPPED'
+        ? '<span style="color:var(--muted);font-size:13px">Skipped</span>'
+        : '<span class="save-flash" id="flash-' + d.id + '"></span>')
+    + '</div>';
+
+  for (const w of (d.warnings || [])) {
+    html += '<div class="warn-row">' + escape(w) + '</div>';
+  }
+  if (d.error) {
+    html += '<div class="warn-row" style="background:var(--bad-bg);'
+         + 'border-color:#fecaca;color:var(--bad)">' + escape(d.error) + '</div>';
+  }
+
+  const dis = locked ? ' disabled' : '';
+  html += '<div class="fields">';
+
+  // Common fields
+  html += field('Product name', 'final_name', d.final_name || d.input_name, d, dis, 'full');
+  html += '<div class="field"><label>Type</label><select onchange="upd(' + d.id +
+    ',\\'kind\\',this.value)"' + dis + '>'
+    + '<option value="dry_good"' + (d.kind === 'dry_good' ? ' selected':'') + '>Dry good</option>'
+    + '<option value="live_fish"' + (d.kind === 'live_fish' ? ' selected':'') + '>Live fish</option>'
+    + '<option value="unknown"' + (d.kind === 'unknown' ? ' selected':'') + '>Unknown</option>'
+    + '</select></div>';
+  html += '<div class="field"><label>Supplier</label><select onchange="upd(' + d.id +
+    ',\\'supplier_id\\',this.value)"' + dis + '>' + supplierOptions(d.supplier_id) + '</select></div>';
+  html += field('SKU', 'sku', d.sku, d, dis);
+  html += field('Barcode / UPC', 'barcode', d.barcode, d, dis);
+  html += field('Supplier code', 'supplier_code', d.supplier_code, d, dis);
+  html += numField('Supply price', 'supply_price', d.supply_price, d, dis);
+  html += numField('Retail price', 'retail_price', d.retail_price, d, dis);
+  html += '<div class="field"><label>Photo</label><label style="font-weight:normal;'
+    + 'text-transform:none;font-size:13px"><input type="checkbox"' +
+    (d.has_photo ? ' checked':'') + dis + ' onchange="upd(' + d.id +
+    ',\\'has_photo\\',this.checked)" /> I have a photo to add in Lightspeed</label></div>';
+
+  if (d.kind === 'dry_good' || d.kind === 'unknown') {
+    html += '<div class="field full"><label>Description'
+      + (d.detected_brand ? ' (brand: ' + escape(d.detected_brand) + ')' : '')
+      + '</label><textarea' + dis + ' onchange="upd(' + d.id +
+      ',\\'description\\',this.value)">' + escape(d.description || '') + '</textarea></div>';
+  }
+
+  if (d.kind === 'live_fish') {
+    const fp = d.fish_profile || {};
+    html += '<div class="fish-section"><h4>Fish care profile</h4><div class="fields">';
+    html += fishField('Common name', 'common_name', fp, d, dis, uncertain);
+    html += fishField('Scientific name', 'scientific_name', fp, d, dis, uncertain);
+    html += fishField('Adult size', 'adult_size', fp, d, dis, uncertain);
+    html += fishField('Min tank size', 'min_tank_size', fp, d, dis, uncertain);
+    html += fishField('Temperature', 'temperature_range', fp, d, dis, uncertain);
+    html += fishField('pH range', 'ph_range', fp, d, dis, uncertain);
+    html += fishField('Hardness', 'hardness', fp, d, dis, uncertain);
+    html += fishField('Temperament', 'temperament', fp, d, dis, uncertain);
+    html += fishField('Care level', 'care_level', fp, d, dis, uncertain);
+    html += fishField('Lifespan', 'lifespan', fp, d, dis, uncertain);
+    html += fishField('Compatible with', 'compatible_with', fp, d, dis, uncertain, 'full');
+    html += fishField('Avoid keeping with', 'avoid_with', fp, d, dis, uncertain, 'full');
+    html += fishFieldArea('Diet & feeding', 'diet', fp, d, dis, uncertain);
+    html += fishFieldArea('Species notes', 'species_notes', fp, d, dis, uncertain);
+    html += '</div></div>';
+  }
+
+  html += '</div>'; // .fields
+
+  if (!locked) {
+    html += '<div class="draft-actions">'
+      + '<button class="secondary" onclick="reenrich(' + d.id + ')">Re-draft</button>'
+      + '<span class="grow"></span>'
+      + '<button class="secondary" onclick="skipDraft(' + d.id + ')">Skip</button>'
+      + '<button class="primary" onclick="createOne(' + d.id + ')">Create in Lightspeed</button>'
+      + '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function field(label, key, val, d, dis, full) {
+  return '<div class="field ' + (full || '') + '"><label>' + label + '</label>'
+    + '<input type="text" value="' + escAttr(val || '') + '"' + dis
+    + ' onchange="upd(' + d.id + ',\\'' + key + '\\',this.value)" /></div>';
+}
+function numField(label, key, val, d, dis) {
+  return '<div class="field"><label>' + label + '</label>'
+    + '<input type="number" step="0.01" value="' + (val != null ? val : '') + '"' + dis
+    + ' onchange="upd(' + d.id + ',\\'' + key + '\\',parseFloat(this.value))" /></div>';
+}
+function fishField(label, key, fp, d, dis, uncertain, full) {
+  const isU = uncertain.includes(key);
+  return '<div class="field ' + (full || '') + (isU ? ' uncertain' : '') + '">'
+    + '<label>' + label + (isU ? ' <span class="uncertain-tag">verify</span>' : '') + '</label>'
+    + '<input type="text" value="' + escAttr(fp[key] || '') + '"' + dis
+    + ' onchange="updFish(' + d.id + ',\\'' + key + '\\',this.value)" /></div>';
+}
+function fishFieldArea(label, key, fp, d, dis, uncertain) {
+  const isU = uncertain.includes(key);
+  return '<div class="field full' + (isU ? ' uncertain' : '') + '">'
+    + '<label>' + label + (isU ? ' <span class="uncertain-tag">verify</span>' : '') + '</label>'
+    + '<textarea' + dis + ' onchange="updFish(' + d.id + ',\\'' + key +
+    '\\',this.value)">' + escape(fp[key] || '') + '</textarea></div>';
+}
+
+let saveTimers = {};
+function upd(id, key, value) {
+  const d = DRAFTS.find(x => x.id === id);
+  if (!d) return;
+  d[key] = value;
+  scheduleSave(id, { [key]: value });
+}
+function updFish(id, key, value) {
+  const d = DRAFTS.find(x => x.id === id);
+  if (!d) return;
+  if (!d.fish_profile) d.fish_profile = {};
+  d.fish_profile[key] = value;
+  scheduleSave(id, { fish_profile: d.fish_profile });
+}
+function scheduleSave(id, patch) {
+  clearTimeout(saveTimers[id]);
+  saveTimers[id] = setTimeout(() => saveDraft(id, patch), 600);
+}
+async function saveDraft(id, patch) {
+  try {
+    const resp = await fetch('/enrich/draft/' + id, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(patch),
+    });
+    if (resp.ok) {
+      const flash = document.getElementById('flash-' + id);
+      if (flash) { flash.textContent = 'saved'; setTimeout(() => flash.textContent = '', 1500); }
+    }
+  } catch (err) { console.warn('save failed', err); }
+}
+
+async function reenrich(id) {
+  if (!confirm('Re-draft this product? Your edits to the description / '
+    + 'care profile will be replaced with a fresh draft.')) return;
+  const resp = await fetch('/enrich/draft/' + id + '/reenrich', { method: 'POST' });
+  const data = await resp.json();
+  if (resp.ok) {
+    const i = DRAFTS.findIndex(x => x.id === id);
+    DRAFTS[i] = data.draft;
+    render();
+  } else {
+    alert('Re-draft failed: ' + (data.detail || resp.statusText));
+  }
+}
+async function createOne(id) {
+  const resp = await fetch('/enrich/draft/' + id + '/create', { method: 'POST' });
+  const data = await resp.json();
+  if (resp.ok) {
+    const i = DRAFTS.findIndex(x => x.id === id);
+    DRAFTS[i] = data.draft;
+    render();
+  } else {
+    alert('Create failed: ' + (data.detail || resp.statusText));
+  }
+}
+async function skipDraft(id) {
+  const resp = await fetch('/enrich/draft/' + id + '/skip', { method: 'POST' });
+  if (resp.ok) {
+    const d = DRAFTS.find(x => x.id === id);
+    if (d) d.status = 'SKIPPED';
+    render();
+  }
+}
+async function createAll() {
+  const pending = DRAFTS.filter(d => d.status === 'DRAFT');
+  if (!pending.length) return;
+  if (!confirm('Create all ' + pending.length + ' pending products in Lightspeed?')) return;
+  for (const d of pending) {
+    try {
+      const resp = await fetch('/enrich/draft/' + d.id + '/create', { method: 'POST' });
+      const data = await resp.json();
+      const i = DRAFTS.findIndex(x => x.id === d.id);
+      if (resp.ok) {
+        DRAFTS[i] = data.draft;
+      } else {
+        DRAFTS[i].error = data.detail || resp.statusText;
+      }
+      render();
+    } catch (err) {
+      const i = DRAFTS.findIndex(x => x.id === d.id);
+      DRAFTS[i].error = 'Network error: ' + err.message;
+      render();
+    }
+  }
+}
+
+function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;'); }
 </script>
 </body></html>"""

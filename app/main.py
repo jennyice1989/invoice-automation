@@ -26,8 +26,12 @@ from app.auth import (
     make_token, require_auth, require_auth_html,
 )
 from app.db import (
+    EnrichmentDraft,
     Invoice, InvoiceLine, PricingRule, SupplierMsrp, SupplierSkuMapping,
     find_existing_invoice, init_db, session_scope, upsert_mapping,
+)
+from app.enrichment import (
+    EnrichmentError, enrich_batch, enrich_product,
 )
 from app.extraction import ExtractionError, extract_invoice_from_pdf
 from app.lightspeed import (
@@ -36,7 +40,10 @@ from app.lightspeed import (
 )
 from app.matching import MatchingService, RawInvoiceLine
 from app.pricing import PricingResult, price_line
-from app.ui import LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML
+from app.ui import (
+    LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -180,6 +187,20 @@ async def settings_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
     return HTMLResponse(SETTINGS_HTML)
+
+
+@app.get("/enrich", response_class=HTMLResponse)
+async def enrich_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(ENRICH_HTML)
+
+
+@app.get("/enrich/review/{batch_id}", response_class=HTMLResponse)
+async def enrich_review_page(batch_id: str, request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(ENRICH_REVIEW_HTML.replace("{{BATCH_ID}}", batch_id))
 
 
 # --------------------------------------------------------------------- #
@@ -515,13 +536,15 @@ class LineDecision(BaseModel):
     barcode: str | None = None
     quantity: float
     unit_cost: float
-    decision: str  # 'match_existing' | 'create_new' | 'skip'
+    decision: str  # 'match_existing' | 'create_new' | 'queue_enrich' | 'skip'
     # For match_existing:
     lightspeed_product_id: str | None = None
-    # For create_new:
+    # For create_new (legacy inline path):
     new_product_name: str | None = None
     new_product_sku: str | None = None
     new_retail_price: float | None = None
+    # For queue_enrich (the integrated path — only kind_hint is needed):
+    kind_hint: str | None = None  # 'dry_good' | 'live_fish' | None
     # Always:
     retail_price_override: float | None = None  # for updating existing products
 
@@ -538,8 +561,10 @@ class FinalizeRequest(BaseModel):
 
 @app.post("/invoices/finalize", dependencies=[Depends(require_auth)])
 async def finalize_invoice(
-    body: FinalizeRequest, session: AsyncSession = Depends(_session),
-):
+    body: FinalizeRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(_session),
+) -> dict:
     """Apply decisions, create/update products, push consignment to Lightspeed."""
     invoice = (await session.execute(
         select(Invoice).where(Invoice.id == body.invoice_id)
@@ -571,6 +596,8 @@ async def finalize_invoice(
     products_updated: list[dict] = []
     skipped: list[dict] = []
     errors: list[str] = []
+    queued_for_enrichment: list[dict] = []
+    enrichment_batch_id: str | None = None
 
     # 1. Matched lines: optionally update existing product costs, queue for consignment
     for idx, m in enumerate(matched):
@@ -694,9 +721,23 @@ async def finalize_invoice(
                 errors.append(f"Failed to create {dec.new_product_name}: {exc}")
             continue
 
+        if dec.decision == "queue_enrich":
+            # Defer this product to the enrichment pipeline. We don't add
+            # it to the consignment yet — that happens when the user
+            # approves the enriched draft on the enrichment review page.
+            queued_for_enrichment.append({
+                "name": dec.description or dec.supplier_code or "(unnamed)",
+                "supplier_code": dec.supplier_code,
+                "barcode": dec.barcode,
+                "kind_hint": dec.kind_hint if dec.kind_hint in ("dry_good", "live_fish") else None,
+                "quantity": dec.quantity,
+                "unit_cost": dec.unit_cost,
+            })
+            continue
+
         errors.append(f"Unknown decision type: {dec.decision}")
 
-    if not items_for_lightspeed:
+    if not items_for_lightspeed and not queued_for_enrichment:
         # Distinguish "you skipped everything" from "everything errored".
         skipped_count = len(skipped)
         decisions_count = len(body.decisions)
@@ -722,34 +763,87 @@ async def finalize_invoice(
         invoice.error = msg
         raise HTTPException(400, msg)
 
-    # 3. Push consignment
-    try:
-        result = await client.import_invoice(
-            outlet_id=outlet_id,
-            supplier_id=invoice.supplier_id,
-            supplier_invoice_number=invoice.supplier_invoice_number,
-            items=items_for_lightspeed,
-            receive_immediately=body.receive_immediately,
-            name=f"Invoice {invoice.supplier_invoice_number}",
-        )
-    except LightspeedError as exc:
-        invoice.status = "FAILED"
-        invoice.error = str(exc)
-        raise HTTPException(502, str(exc)) from exc
+    # 3. Push consignment (if we have any items now). If everything was
+    # queued for enrichment and nothing matched, we skip the consignment
+    # and create it later when the first enriched product is approved.
+    consignment_id: str | None = None
+    consignment_status: str | None = None
+    items_added = 0
+    items_failed = 0
+    consignment_errors: list[str] = []
 
-    invoice.status = "IMPORTED"
-    invoice.consignment_id = result["consignment_id"]
+    if items_for_lightspeed:
+        try:
+            result = await client.import_invoice(
+                outlet_id=outlet_id,
+                supplier_id=invoice.supplier_id,
+                supplier_invoice_number=invoice.supplier_invoice_number,
+                items=items_for_lightspeed,
+                receive_immediately=body.receive_immediately,
+                name=f"Invoice {invoice.supplier_invoice_number}",
+            )
+        except LightspeedError as exc:
+            invoice.status = "FAILED"
+            invoice.error = str(exc)
+            raise HTTPException(502, str(exc)) from exc
+        consignment_id = result["consignment_id"]
+        consignment_status = result["status"]
+        items_added = result["items_added"]
+        items_failed = result["items_failed"]
+        consignment_errors = result.get("errors", [])
+        invoice.consignment_id = consignment_id
+
+    # 4. Queue enrichment drafts for the products we deferred
+    if queued_for_enrichment:
+        import uuid as _uuid
+        enrichment_batch_id = _uuid.uuid4().hex[:12]
+        for q in queued_for_enrichment:
+            draft = EnrichmentDraft(
+                batch_id=enrichment_batch_id,
+                input_name=q["name"],
+                kind=q["kind_hint"] or "unknown",
+                final_name=q["name"],
+                supplier_id=invoice.supplier_id,
+                supplier_code=q["supplier_code"],
+                barcode=q["barcode"],
+                supply_price=q["unit_cost"],
+                status="PENDING_ENRICH",  # not drafted yet — done in background
+                source_invoice_id=invoice.id,
+                source_consignment_id=consignment_id,
+                source_quantity=q["quantity"],
+                source_cost=q["unit_cost"],
+            )
+            session.add(draft)
+
+    # Status: if everything got pushed, mark IMPORTED. If we have queued
+    # items waiting on enrichment, the invoice is partially done.
+    if queued_for_enrichment and items_for_lightspeed:
+        invoice.status = "IMPORTED_PARTIAL"
+    elif queued_for_enrichment:
+        invoice.status = "AWAITING_ENRICHMENT"
+    else:
+        invoice.status = "IMPORTED"
+
+    # Kick off background enrichment for the queued products. Runs after
+    # the response returns to the client.
+    if enrichment_batch_id:
+        background_tasks.add_task(_enrich_pending_drafts, enrichment_batch_id)
 
     return {
         "ok": True,
-        "consignment_id": result["consignment_id"],
-        "status": result["status"],
-        "items_added": result["items_added"],
-        "items_failed": result["items_failed"],
+        "consignment_id": consignment_id,
+        "status": consignment_status or invoice.status,
+        "items_added": items_added,
+        "items_failed": items_failed,
         "products_created": products_created,
         "products_updated": products_updated,
         "skipped": skipped,
-        "errors": errors + result.get("errors", []),
+        "queued_for_enrichment_count": len(queued_for_enrichment),
+        "enrichment_batch_id": enrichment_batch_id,
+        "enrichment_redirect": (
+            f"/enrich/review/{enrichment_batch_id}" if enrichment_batch_id else None
+        ),
+        "errors": errors + consignment_errors,
     }
 
 
@@ -917,6 +1011,382 @@ async def upload_msrp(
         ))
         added += 1
     return {"added": added, "errors": errors}
+
+
+# --------------------------------------------------------------------- #
+# Product enrichment                                                    #
+# --------------------------------------------------------------------- #
+
+import uuid as _uuid
+from fastapi import BackgroundTasks
+
+
+async def _enrich_pending_drafts(batch_id: str):
+    """Background task: draft content for every PENDING_ENRICH row in a
+    batch, one at a time. Marks each DRAFT when done, or records error.
+    Runs in its own DB session since the request session has closed."""
+    async with session_scope() as session:
+        rows = (await session.execute(
+            select(EnrichmentDraft)
+            .where(EnrichmentDraft.batch_id == batch_id)
+            .where(EnrichmentDraft.status == "PENDING_ENRICH")
+        )).scalars().all()
+        for draft in rows:
+            name = draft.final_name or draft.input_name
+            kind_hint = draft.kind if draft.kind in ("dry_good", "live_fish") else None
+            try:
+                result = await enrich_product(name, kind_hint=kind_hint)
+                draft.kind = result.kind
+                draft.description = result.description
+                draft.fish_profile = _fish_profile_to_dict(result.fish_profile)
+                draft.detected_brand = result.detected_brand
+                draft.warnings = {"list": result.warnings} if result.warnings else None
+                draft.status = "DRAFT"
+            except EnrichmentError as exc:
+                draft.error = str(exc)
+                draft.warnings = {"list": [f"Enrichment failed: {exc}"]}
+                draft.status = "DRAFT"  # so the user can still edit/skip
+            await session.flush()
+
+
+class EnrichItemIn(BaseModel):
+    name: str
+    supplier_name: str | None = None
+    kind_hint: str | None = None  # 'dry_good' | 'live_fish' | None
+
+
+class EnrichBatchRequest(BaseModel):
+    items: list[EnrichItemIn]
+
+
+def _fish_profile_to_dict(fp) -> dict | None:
+    if fp is None:
+        return None
+    return {
+        "common_name": fp.common_name,
+        "scientific_name": fp.scientific_name,
+        "adult_size": fp.adult_size,
+        "min_tank_size": fp.min_tank_size,
+        "temperature_range": fp.temperature_range,
+        "ph_range": fp.ph_range,
+        "hardness": fp.hardness,
+        "temperament": fp.temperament,
+        "care_level": fp.care_level,
+        "lifespan": fp.lifespan,
+        "compatible_with": fp.compatible_with,
+        "avoid_with": fp.avoid_with,
+        "diet": fp.diet,
+        "species_notes": fp.species_notes,
+        "uncertain_fields": fp.uncertain_fields,
+    }
+
+
+@app.post("/enrich/batch", dependencies=[Depends(require_auth)])
+async def enrich_products_batch(
+    body: EnrichBatchRequest,
+    session: AsyncSession = Depends(_session),
+):
+    """Enrich a batch of products. Each gets a draft (description or fish
+    profile) and is stored as an EnrichmentDraft for review."""
+    if not body.items:
+        raise HTTPException(400, "No products submitted")
+    if len(body.items) > 100:
+        raise HTTPException(400, "Max 100 products per batch")
+
+    batch_id = _uuid.uuid4().hex[:12]
+    products = [
+        {
+            "name": i.name,
+            "supplier_name": i.supplier_name,
+            "kind_hint": i.kind_hint if i.kind_hint in ("dry_good", "live_fish") else None,
+        }
+        for i in body.items if i.name and i.name.strip()
+    ]
+
+    results = await enrich_batch(products)
+
+    draft_ids = []
+    for result in results:
+        draft = EnrichmentDraft(
+            batch_id=batch_id,
+            input_name=result.input_name,
+            kind=result.kind,
+            description=result.description,
+            fish_profile=_fish_profile_to_dict(result.fish_profile),
+            detected_brand=result.detected_brand,
+            final_name=result.input_name,
+            warnings={"list": result.warnings} if result.warnings else None,
+            status="DRAFT",
+        )
+        session.add(draft)
+        await session.flush()
+        draft_ids.append(draft.id)
+
+    return {
+        "batch_id": batch_id,
+        "count": len(draft_ids),
+        "draft_ids": draft_ids,
+        "redirect": f"/enrich/review/{batch_id}",
+    }
+
+
+@app.get("/enrich/batch/{batch_id}", dependencies=[Depends(require_auth)])
+async def get_enrich_batch(
+    batch_id: str, session: AsyncSession = Depends(_session),
+):
+    """Return all drafts in a batch for the review screen."""
+    rows = (await session.execute(
+        select(EnrichmentDraft)
+        .where(EnrichmentDraft.batch_id == batch_id)
+        .order_by(EnrichmentDraft.id.asc())
+    )).scalars().all()
+    if not rows:
+        raise HTTPException(404, "Batch not found")
+    return {"batch_id": batch_id, "drafts": [_draft_to_dict(d) for d in rows]}
+
+
+def _draft_to_dict(d: EnrichmentDraft) -> dict:
+    return {
+        "id": d.id,
+        "input_name": d.input_name,
+        "kind": d.kind,
+        "description": d.description,
+        "fish_profile": d.fish_profile,
+        "detected_brand": d.detected_brand,
+        "final_name": d.final_name,
+        "sku": d.sku,
+        "barcode": d.barcode,
+        "supplier_id": d.supplier_id,
+        "supplier_code": d.supplier_code,
+        "supply_price": d.supply_price,
+        "retail_price": d.retail_price,
+        "has_photo": d.has_photo,
+        "status": d.status,
+        "lightspeed_product_id": d.lightspeed_product_id,
+        "warnings": (d.warnings or {}).get("list", []),
+        "error": d.error,
+        # Source context (when queued from an invoice)
+        "source_invoice_id": d.source_invoice_id,
+        "source_consignment_id": d.source_consignment_id,
+        "source_quantity": d.source_quantity,
+    }
+
+
+class DraftUpdate(BaseModel):
+    """Fields the user edits on the review screen."""
+    final_name: str | None = None
+    kind: str | None = None
+    description: str | None = None
+    fish_profile: dict | None = None
+    sku: str | None = None
+    barcode: str | None = None
+    supplier_id: str | None = None
+    supplier_code: str | None = None
+    supply_price: float | None = None
+    retail_price: float | None = None
+    has_photo: bool | None = None
+
+
+@app.put("/enrich/draft/{draft_id}", dependencies=[Depends(require_auth)])
+async def update_draft(
+    draft_id: int, body: DraftUpdate,
+    session: AsyncSession = Depends(_session),
+):
+    """Save edits to a single draft."""
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft.status == "CREATED":
+        raise HTTPException(409, "This product was already created")
+
+    for fieldname in (
+        "final_name", "kind", "description", "fish_profile", "sku",
+        "barcode", "supplier_id", "supplier_code", "supply_price",
+        "retail_price", "has_photo",
+    ):
+        val = getattr(body, fieldname)
+        if val is not None:
+            setattr(draft, fieldname, val)
+
+    return {"ok": True, "draft": _draft_to_dict(draft)}
+
+
+@app.post("/enrich/draft/{draft_id}/reenrich", dependencies=[Depends(require_auth)])
+async def reenrich_draft(
+    draft_id: int, session: AsyncSession = Depends(_session),
+):
+    """Re-run enrichment on a draft — useful after changing the kind hint
+    or fixing the product name."""
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft.status == "CREATED":
+        raise HTTPException(409, "This product was already created")
+
+    name = draft.final_name or draft.input_name
+    kind_hint = draft.kind if draft.kind in ("dry_good", "live_fish") else None
+    try:
+        result = await enrich_product(name, kind_hint=kind_hint)
+    except EnrichmentError as exc:
+        raise HTTPException(502, f"Re-enrichment failed: {exc}")
+
+    draft.kind = result.kind
+    draft.description = result.description
+    draft.fish_profile = _fish_profile_to_dict(result.fish_profile)
+    draft.detected_brand = result.detected_brand
+    draft.warnings = {"list": result.warnings} if result.warnings else None
+    return {"ok": True, "draft": _draft_to_dict(draft)}
+
+
+@app.post("/enrich/draft/{draft_id}/create", dependencies=[Depends(require_auth)])
+async def create_from_draft(
+    draft_id: int, session: AsyncSession = Depends(_session),
+):
+    """Push a single approved draft to Lightspeed as a new product."""
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft.status == "CREATED":
+        raise HTTPException(409, "Already created")
+
+    name = draft.final_name or draft.input_name
+    if not name:
+        raise HTTPException(400, "Product needs a name")
+
+    # Build description: fish profile renders to formatted text; dry goods
+    # use the drafted description directly.
+    if draft.kind == "live_fish" and draft.fish_profile:
+        from app.enrichment import FishProfile
+        fp = FishProfile(**{
+            k: v for k, v in draft.fish_profile.items()
+            if k != "uncertain_fields"
+        })
+        description = fp.to_description()
+    else:
+        description = draft.description
+
+    client = _client()
+    try:
+        created = await client.create_product(
+            name=name,
+            sku=draft.sku,
+            supplier_id=draft.supplier_id,
+            supplier_code=draft.supplier_code,
+            barcode=draft.barcode,
+            supply_price=draft.supply_price,
+            retail_price=draft.retail_price,
+            description=description,
+        )
+    except LightspeedError as exc:
+        draft.error = str(exc)
+        raise HTTPException(502, f"Lightspeed create failed: {exc}")
+
+    new_id = created.get("id")
+    if not new_id:
+        draft.error = "create_product returned no id"
+        raise HTTPException(502, "Lightspeed did not return a product id")
+
+    draft.status = "CREATED"
+    draft.lightspeed_product_id = new_id
+    draft.error = None
+
+    # If this draft came from an invoice that already has a consignment,
+    # add the new product to that consignment now.
+    added_to_consignment = False
+    if draft.source_consignment_id and draft.source_quantity:
+        try:
+            from app.lightspeed import MatchedLineItem
+            await client.add_product_to_consignment(
+                draft.source_consignment_id,
+                MatchedLineItem(
+                    product_id=new_id,
+                    count=float(draft.source_quantity),
+                    cost=float(draft.source_cost or draft.supply_price or 0),
+                ),
+            )
+            added_to_consignment = True
+        except LightspeedError as exc:
+            # Don't fail the create — the product exists. Surface a warning.
+            warns = (draft.warnings or {}).get("list", [])
+            warns.append(
+                f"Created the product, but failed to add it to consignment "
+                f"{draft.source_consignment_id}: {exc}. Add it manually in "
+                f"Lightspeed."
+            )
+            draft.warnings = {"list": warns}
+
+    # Save a supplier-code mapping so the next invoice resolves automatically
+    if draft.supplier_id and draft.supplier_code:
+        await upsert_mapping(
+            session,
+            supplier_id=draft.supplier_id,
+            supplier_code=draft.supplier_code,
+            lightspeed_product_id=new_id,
+            lightspeed_sku=draft.sku,
+            product_name=name,
+        )
+
+    return {
+        "ok": True,
+        "lightspeed_product_id": new_id,
+        "added_to_consignment": added_to_consignment,
+        "draft": _draft_to_dict(draft),
+    }
+
+
+@app.post("/enrich/draft/{draft_id}/skip", dependencies=[Depends(require_auth)])
+async def skip_draft(
+    draft_id: int, session: AsyncSession = Depends(_session),
+):
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft.status != "CREATED":
+        draft.status = "SKIPPED"
+    return {"ok": True}
+
+
+@app.delete("/enrich/draft/{draft_id}", dependencies=[Depends(require_auth)])
+async def delete_draft(
+    draft_id: int, session: AsyncSession = Depends(_session),
+):
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if draft:
+        await session.delete(draft)
+    return {"ok": True}
+
+
+@app.get("/enrich/batches", dependencies=[Depends(require_auth)])
+async def list_enrich_batches(session: AsyncSession = Depends(_session)):
+    """List recent enrichment batches with progress counts."""
+    rows = (await session.execute(
+        select(EnrichmentDraft).order_by(EnrichmentDraft.created_at.desc())
+    )).scalars().all()
+    batches: dict = {}
+    for d in rows:
+        b = batches.setdefault(d.batch_id, {
+            "batch_id": d.batch_id,
+            "created_at": d.created_at.isoformat(),
+            "total": 0, "created": 0, "skipped": 0, "draft": 0,
+        })
+        b["total"] += 1
+        if d.status == "CREATED":
+            b["created"] += 1
+        elif d.status == "SKIPPED":
+            b["skipped"] += 1
+        else:
+            b["draft"] += 1
+    return {"data": list(batches.values())}
 
 
 # --------------------------------------------------------------------- #

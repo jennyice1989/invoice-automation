@@ -191,6 +191,58 @@ class SupplierMsrp(Base):
     )
 
 
+class EnrichmentDraft(Base):
+    """A product being enriched for catalog entry. Holds the draft content
+    (description or fish profile) plus the manually-entered fields (UPC,
+    pricing, photo status). Lifecycle: DRAFT -> CREATED | SKIPPED."""
+
+    __tablename__ = "enrichment_drafts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # A batch groups products entered together (one bulk-paste, one import).
+    batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    input_name: Mapped[str] = mapped_column(String(500))
+    kind: Mapped[str] = mapped_column(String(16), default="unknown")  # dry_good | live_fish | unknown
+
+    # Drafted by Claude
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fish_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    detected_brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # Manually entered / from invoice
+    final_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    supplier_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    supplier_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    supply_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    has_photo: Mapped[bool] = mapped_column(default=False)
+
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT")  # DRAFT | CREATED | SKIPPED
+    lightspeed_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    warnings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # If this draft was queued from an invoice, hold enough context to
+    # add the resulting product to that invoice's consignment after
+    # the user approves it.
+    source_invoice_id: Mapped[int | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    source_consignment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 # --------------------------------------------------------------------- #
 # Engine                                                                #
 # --------------------------------------------------------------------- #
@@ -254,6 +306,19 @@ async def init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS pdf_bytes BYTEA"
         ))
+        # Enrichment draft source columns (added when invoice integration shipped)
+        for stmt in (
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_invoice_id INTEGER",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_consignment_id VARCHAR(64)",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_cost DOUBLE PRECISION",
+        ):
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                # Table may not exist yet on first deploy; create_all
+                # ran above and made it with the column, so we're fine.
+                pass
 
     # Seed default pricing rules if the table is empty.
     async with session_scope() as session:
