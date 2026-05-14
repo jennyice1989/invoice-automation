@@ -14,7 +14,8 @@ from datetime import datetime
 from typing import Annotated, AsyncIterator
 
 from fastapi import (
-    Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status,
+    BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request,
+    UploadFile, status,
 )
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
@@ -1018,7 +1019,6 @@ async def upload_msrp(
 # --------------------------------------------------------------------- #
 
 import uuid as _uuid
-from fastapi import BackgroundTasks
 
 
 async def _enrich_pending_drafts(batch_id: str):
