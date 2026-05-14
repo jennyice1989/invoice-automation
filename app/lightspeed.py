@@ -331,6 +331,69 @@ class LightspeedClient:
         return data.get("data", data)
 
     # ------------------------------------------------------------------ #
+    # Product create / update                                            #
+    # ------------------------------------------------------------------ #
+
+    async def create_product(
+        self,
+        *,
+        name: str,
+        sku: str | None = None,
+        supplier_id: str | None = None,
+        supplier_code: str | None = None,
+        barcode: str | None = None,
+        supply_price: float | None = None,
+        retail_price: float | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Create a product in Lightspeed. Returns the new product dict."""
+        payload: dict[str, Any] = {"name": name}
+        if sku:
+            payload["sku"] = sku
+        if supplier_id:
+            payload["supplier_id"] = supplier_id
+        if supplier_code:
+            payload["supplier_code"] = supplier_code
+        if barcode:
+            payload["barcode"] = barcode
+        if supply_price is not None:
+            payload["supply_price"] = supply_price
+        if retail_price is not None:
+            # X-Series stores retail price as a list of (price_book_id, price);
+            # the simplest write path is "price_excluding_tax" on default book.
+            payload["price_excluding_tax"] = retail_price
+        if description:
+            payload["description"] = description
+
+        data = await self._request("POST", "/products", json=payload)
+        return data.get("data", data)
+
+    async def update_product(
+        self,
+        product_id: str,
+        *,
+        retail_price: float | None = None,
+        supply_price: float | None = None,
+        supplier_code: str | None = None,
+    ) -> dict:
+        """Update select fields on an existing product."""
+        payload: dict[str, Any] = {}
+        if retail_price is not None:
+            payload["price_excluding_tax"] = retail_price
+        if supply_price is not None:
+            payload["supply_price"] = supply_price
+        if supplier_code is not None:
+            payload["supplier_code"] = supplier_code
+
+        if not payload:
+            return {}
+
+        data = await self._request(
+            "PUT", f"/products/{product_id}", json=payload
+        )
+        return data.get("data", data)
+
+    # ------------------------------------------------------------------ #
     # High-level: push a complete invoice                                #
     # ------------------------------------------------------------------ #
 

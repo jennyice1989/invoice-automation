@@ -1,60 +1,51 @@
 """
-FastAPI service that exposes the Lightspeed integration.
-
-Two main flows:
-
-  POST /invoices/match     -> raw extracted lines -> matched + unmatched
-  POST /invoices/import    -> fully-matched lines -> Lightspeed consignment
-
-And supporting endpoints for mappings, suppliers, products, outlets.
+FastAPI service: invoice upload -> extract -> match -> price -> review -> push.
 """
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from datetime import datetime
+from typing import Annotated, AsyncIterator
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
-from fastapi.responses import HTMLResponse
+from fastapi import (
+    Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status,
+)
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import (
+    APP_PASSWORD, COOKIE_MAX_AGE, COOKIE_NAME, check_password,
+    make_token, require_auth, require_auth_html,
+)
 from app.db import (
-    SupplierSkuMapping,
-    init_db,
-    session_scope,
-    upsert_mapping,
+    Invoice, InvoiceLine, PricingRule, SupplierMsrp, SupplierSkuMapping,
+    find_existing_invoice, init_db, session_scope, upsert_mapping,
 )
 from app.extraction import ExtractionError, extract_invoice_from_pdf
 from app.lightspeed import (
-    LightspeedAuthError,
-    LightspeedClient,
-    LightspeedError,
-    LightspeedNotFoundError,
-    MatchedLineItem,
+    LightspeedAuthError, LightspeedClient, LightspeedError,
+    LightspeedNotFoundError, MatchedLineItem,
 )
 from app.matching import MatchingService, RawInvoiceLine
+from app.pricing import PricingResult, price_line
+from app.ui import LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-# --------------------------------------------------------------------- #
-# Config                                                                #
-# --------------------------------------------------------------------- #
 
 LIGHTSPEED_DOMAIN_PREFIX = os.environ.get("LIGHTSPEED_DOMAIN_PREFIX", "")
 LIGHTSPEED_TOKEN = os.environ.get("LIGHTSPEED_PERSONAL_TOKEN", "")
 DEFAULT_OUTLET_ID = os.environ.get("LIGHTSPEED_DEFAULT_OUTLET_ID", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-
-# --------------------------------------------------------------------- #
-# App lifecycle                                                         #
-# --------------------------------------------------------------------- #
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -72,7 +63,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.error("DB init failed: %s", exc)
     else:
-        logger.warning("DATABASE_URL not set; mapping features will fail")
+        logger.warning("DATABASE_URL not set")
 
     try:
         yield
@@ -81,920 +72,727 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await app.state.lightspeed.close()
 
 
-app = FastAPI(
-    title="Invoice -> Lightspeed importer",
-    version="0.2.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Invoice Importer", version="1.0.0", lifespan=lifespan)
 
 
 def _client() -> LightspeedClient:
     client = getattr(app.state, "lightspeed", None)
     if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Lightspeed credentials not configured",
-        )
+        raise HTTPException(503, "Lightspeed not configured")
     return client
 
 
 async def _session() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency that hands out a transactional session."""
     async with session_scope() as session:
         yield session
 
 
 # --------------------------------------------------------------------- #
-# Models                                                                #
+# Auth                                                                  #
 # --------------------------------------------------------------------- #
 
-class LineItemIn(BaseModel):
-    product_id: str
-    count: float = Field(..., gt=0)
-    cost: float = Field(..., ge=0)
-    received: float | None = None
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(error: str | None = None) -> str:
+    return LOGIN_HTML.replace("{{ERROR}}", error or "")
 
 
-class InvoiceImportRequest(BaseModel):
-    supplier_invoice_number: str
-    items: list[LineItemIn]
-    supplier_id: str | None = None
-    outlet_id: str | None = None
-    receive_immediately: bool = False
-    name: str | None = None
+@app.post("/login")
+async def login_post(password: str = Form(...)):
+    if not check_password(password):
+        return RedirectResponse(url="/login?error=Incorrect+password", status_code=303)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        COOKIE_NAME, make_token(),
+        max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
+        secure=True,
+    )
+    return response
 
 
-class InvoiceImportResponse(BaseModel):
-    consignment_id: str
-    status: str
-    items_added: int
-    items_failed: int
-    errors: list[dict]
-
-
-class SupplierLookupResponse(BaseModel):
-    found: bool
-    supplier_id: str | None
-    name: str | None
-
-
-class ProductLookupResponse(BaseModel):
-    found: bool
-    product_id: str | None
-    sku: str | None
-    name: str | None
-    matched_by: str | None
-
-
-class RawLineIn(BaseModel):
-    supplier_code: str | None = None
-    description: str | None = None
-    barcode: str | None = None
-    quantity: float = Field(..., gt=0)
-    unit_cost: float = Field(..., ge=0)
-
-
-class InvoiceMatchRequest(BaseModel):
-    supplier_id: str
-    lines: list[RawLineIn]
-
-
-class MatchedLineOut(BaseModel):
-    supplier_code: str | None
-    description: str | None
-    quantity: float
-    unit_cost: float
-    product_id: str
-    product_sku: str | None
-    product_name: str | None
-    matched_by: str
-    confidence: float
-
-
-class UnmatchedLineOut(BaseModel):
-    supplier_code: str | None
-    description: str | None
-    quantity: float
-    unit_cost: float
-    candidates: list[dict]
-    reason: str
-
-
-class MatchResponse(BaseModel):
-    matched: list[MatchedLineOut]
-    unmatched: list[UnmatchedLineOut]
-    summary: dict
-
-
-class MappingCreate(BaseModel):
-    supplier_id: str
-    supplier_code: str
-    lightspeed_product_id: str
-    lightspeed_sku: str | None = None
-    product_name: str | None = None
-
-
-class MappingOut(BaseModel):
-    id: int
-    supplier_id: str
-    supplier_code: str
-    lightspeed_product_id: str
-    lightspeed_sku: str | None
-    product_name: str | None
+@app.post("/logout")
+async def logout():
+    resp = RedirectResponse(url="/login", status_code=303)
+    resp.delete_cookie(COOKIE_NAME)
+    return resp
 
 
 # --------------------------------------------------------------------- #
-# Health and discovery                                                  #
+# Health (unauthenticated)                                              #
 # --------------------------------------------------------------------- #
 
 @app.get("/healthz")
-async def healthz() -> dict:
+async def healthz():
     return {
         "ok": True,
         "lightspeed_configured": bool(LIGHTSPEED_DOMAIN_PREFIX),
         "db_configured": bool(DATABASE_URL),
-    }
-
-
-@app.get("/outlets")
-async def list_outlets() -> dict:
-    try:
-        outlets = await _client().list_outlets()
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"data": [{"id": o["id"], "name": o.get("name")} for o in outlets]}
-
-
-# --------------------------------------------------------------------- #
-# Suppliers                                                             #
-# --------------------------------------------------------------------- #
-
-@app.get("/suppliers")
-async def list_suppliers() -> dict:
-    try:
-        suppliers = await _client().list_suppliers()
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {
-        "data": [{"id": s["id"], "name": s.get("name")} for s in suppliers]
-    }
-
-
-@app.get("/suppliers/lookup", response_model=SupplierLookupResponse)
-async def lookup_supplier(name: str) -> SupplierLookupResponse:
-    try:
-        supplier = await _client().find_supplier_by_name(name)
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if supplier is None:
-        return SupplierLookupResponse(found=False, supplier_id=None, name=None)
-    return SupplierLookupResponse(
-        found=True, supplier_id=supplier["id"], name=supplier.get("name")
-    )
-
-
-@app.get("/suppliers/search")
-async def search_suppliers(q: str) -> dict:
-    try:
-        matches = await _client().search_suppliers(q)
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {
-        "matches": [{"id": s["id"], "name": s.get("name")} for s in matches]
+        "auth_configured": bool(APP_PASSWORD),
     }
 
 
 # --------------------------------------------------------------------- #
-# Products                                                              #
-# --------------------------------------------------------------------- #
-
-@app.get("/products/lookup", response_model=ProductLookupResponse)
-async def lookup_product(
-    supplier_code: str | None = None,
-    sku: str | None = None,
-) -> ProductLookupResponse:
-    if not (supplier_code or sku):
-        raise HTTPException(
-            status_code=400, detail="Pass either supplier_code or sku"
-        )
-
-    client = _client()
-    try:
-        product = None
-        matched_by = None
-        if supplier_code:
-            product = await client.find_product_by_supplier_code(supplier_code)
-            matched_by = "supplier_code" if product else None
-        if product is None and sku:
-            product = await client.find_product_by_sku(sku)
-            matched_by = "sku" if product else None
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    if product is None:
-        return ProductLookupResponse(
-            found=False, product_id=None, sku=None, name=None, matched_by=None
-        )
-
-    return ProductLookupResponse(
-        found=True,
-        product_id=product["id"],
-        sku=product.get("sku"),
-        name=product.get("name"),
-        matched_by=matched_by,
-    )
-
-
-# --------------------------------------------------------------------- #
-# Matching                                                              #
-# --------------------------------------------------------------------- #
-
-@app.post("/invoices/match", response_model=MatchResponse)
-async def match_invoice(
-    req: InvoiceMatchRequest,
-    session: AsyncSession = Depends(_session),
-) -> MatchResponse:
-    """
-    Resolve raw invoice lines to Lightspeed products.
-
-    Returns separate matched/unmatched lists. Unmatched lines come with
-    up to 3 fuzzy-match candidates so a UI can suggest them.
-    """
-    service = MatchingService(_client(), session)
-    raw_lines = [
-        RawInvoiceLine(
-            supplier_code=l.supplier_code,
-            description=l.description,
-            barcode=l.barcode,
-            quantity=l.quantity,
-            unit_cost=l.unit_cost,
-        )
-        for l in req.lines
-    ]
-    result = await service.match_invoice(req.supplier_id, raw_lines)
-
-    matched_out = [
-        MatchedLineOut(
-            supplier_code=m.raw.supplier_code,
-            description=m.raw.description,
-            quantity=m.raw.quantity,
-            unit_cost=m.raw.unit_cost,
-            product_id=m.product_id,
-            product_sku=m.product_sku,
-            product_name=m.product_name,
-            matched_by=m.matched_by,
-            confidence=m.confidence,
-        )
-        for m in result.matched
-    ]
-    unmatched_out = [
-        UnmatchedLineOut(
-            supplier_code=u.raw.supplier_code,
-            description=u.raw.description,
-            quantity=u.raw.quantity,
-            unit_cost=u.raw.unit_cost,
-            candidates=u.candidates,
-            reason=u.reason,
-        )
-        for u in result.unmatched
-    ]
-
-    return MatchResponse(
-        matched=matched_out,
-        unmatched=unmatched_out,
-        summary={
-            "total_lines": len(req.lines),
-            "matched_count": len(matched_out),
-            "unmatched_count": len(unmatched_out),
-            "by_method": _count_by(matched_out, "matched_by"),
-        },
-    )
-
-
-def _count_by(items, attr: str) -> dict:
-    counts: dict = {}
-    for item in items:
-        key = getattr(item, attr)
-        counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-# --------------------------------------------------------------------- #
-# Mappings (the "memory")                                               #
-# --------------------------------------------------------------------- #
-
-@app.post("/mappings", response_model=MappingOut)
-async def create_mapping(
-    body: MappingCreate,
-    session: AsyncSession = Depends(_session),
-) -> MappingOut:
-    """
-    Teach the system: 'when supplier X sends code Y, that's product Z.'
-    Idempotent — calling twice with the same supplier+code updates the
-    existing mapping rather than failing.
-    """
-    mapping = await upsert_mapping(
-        session,
-        supplier_id=body.supplier_id,
-        supplier_code=body.supplier_code,
-        lightspeed_product_id=body.lightspeed_product_id,
-        lightspeed_sku=body.lightspeed_sku,
-        product_name=body.product_name,
-    )
-    await session.flush()
-    return MappingOut(
-        id=mapping.id,
-        supplier_id=mapping.supplier_id,
-        supplier_code=mapping.supplier_code,
-        lightspeed_product_id=mapping.lightspeed_product_id,
-        lightspeed_sku=mapping.lightspeed_sku,
-        product_name=mapping.product_name,
-    )
-
-
-@app.get("/mappings")
-async def list_mappings(
-    supplier_id: str | None = None,
-    session: AsyncSession = Depends(_session),
-) -> dict:
-    stmt = select(SupplierSkuMapping).order_by(SupplierSkuMapping.id.desc())
-    if supplier_id:
-        stmt = stmt.where(SupplierSkuMapping.supplier_id == supplier_id)
-    rows = (await session.execute(stmt)).scalars().all()
-    return {
-        "data": [
-            {
-                "id": m.id,
-                "supplier_id": m.supplier_id,
-                "supplier_code": m.supplier_code,
-                "lightspeed_product_id": m.lightspeed_product_id,
-                "lightspeed_sku": m.lightspeed_sku,
-                "product_name": m.product_name,
-            }
-            for m in rows
-        ]
-    }
-
-
-# --------------------------------------------------------------------- #
-# Import (final stage)                                                  #
-# --------------------------------------------------------------------- #
-
-@app.post("/invoices/import", response_model=InvoiceImportResponse)
-async def import_invoice(req: InvoiceImportRequest) -> InvoiceImportResponse:
-    outlet_id = req.outlet_id or DEFAULT_OUTLET_ID
-    if not outlet_id:
-        raise HTTPException(
-            status_code=400,
-            detail="outlet_id required (or set LIGHTSPEED_DEFAULT_OUTLET_ID)",
-        )
-
-    items = [
-        MatchedLineItem(
-            product_id=i.product_id,
-            count=i.count,
-            cost=i.cost,
-            received=i.received,
-        )
-        for i in req.items
-    ]
-
-    try:
-        result = await _client().import_invoice(
-            outlet_id=outlet_id,
-            supplier_id=req.supplier_id,
-            supplier_invoice_number=req.supplier_invoice_number,
-            items=items,
-            receive_immediately=req.receive_immediately,
-            name=req.name,
-        )
-    except LightspeedAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except LightspeedNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    return InvoiceImportResponse(**result)
-
-
-@app.get("/consignments/{consignment_id}")
-async def get_consignment(consignment_id: str) -> dict:
-    try:
-        return await _client().get_consignment(consignment_id)
-    except LightspeedNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except LightspeedError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-# --------------------------------------------------------------------- #
-# Upload + extract + match (the one-shot endpoint)                      #
-# --------------------------------------------------------------------- #
-
-@app.post("/invoices/process")
-async def process_invoice(
-    file: UploadFile = File(...),
-    session: AsyncSession = Depends(_session),
-) -> dict:
-    """
-    Full pipeline: PDF in, matched invoice out (or unmatched lines for review).
-
-    1. Read uploaded PDF
-    2. Extract structured data via Claude
-    3. Resolve supplier name -> supplier_id (exact, then fuzzy)
-    4. Run matching pipeline on line items
-    5. Return everything to the caller; let them decide whether to import
-    """
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400, detail="Only PDF files are supported"
-        )
-
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(pdf_bytes) > 30 * 1024 * 1024:
-        raise HTTPException(
-            status_code=400, detail="PDF too large (max 30 MB)"
-        )
-
-    # 1. Extract
-    try:
-        invoice = await extract_invoice_from_pdf(pdf_bytes)
-    except ExtractionError as exc:
-        raise HTTPException(status_code=502, detail=f"Extraction failed: {exc}")
-
-    # 2. Resolve supplier
-    client = _client()
-    supplier = None
-    supplier_id: str | None = None
-    if invoice.supplier_name:
-        try:
-            supplier = await client.find_supplier_by_name(invoice.supplier_name)
-            if not supplier:
-                fuzzy = await client.search_suppliers(invoice.supplier_name)
-                if len(fuzzy) == 1:
-                    supplier = fuzzy[0]
-                elif len(fuzzy) > 1:
-                    # Multiple matches — surface them, don't pick.
-                    invoice.warnings.append(
-                        f"Supplier name '{invoice.supplier_name}' matches "
-                        f"{len(fuzzy)} suppliers; pick one manually."
-                    )
-        except LightspeedError as exc:
-            invoice.warnings.append(f"Supplier lookup failed: {exc}")
-
-    if supplier:
-        supplier_id = supplier["id"]
-
-    # 3. Match line items
-    matched: list = []
-    unmatched: list = []
-    if supplier_id and invoice.lines:
-        service = MatchingService(client, session)
-        raw_lines = [
-            RawInvoiceLine(
-                supplier_code=l.supplier_code,
-                description=l.description,
-                barcode=l.barcode,
-                quantity=l.quantity,
-                unit_cost=l.unit_cost,
-            )
-            for l in invoice.lines
-        ]
-        try:
-            mr = await service.match_invoice(supplier_id, raw_lines)
-            matched = [
-                {
-                    "supplier_code": m.raw.supplier_code,
-                    "description": m.raw.description,
-                    "quantity": m.raw.quantity,
-                    "unit_cost": m.raw.unit_cost,
-                    "product_id": m.product_id,
-                    "product_sku": m.product_sku,
-                    "product_name": m.product_name,
-                    "matched_by": m.matched_by,
-                    "confidence": m.confidence,
-                }
-                for m in mr.matched
-            ]
-            unmatched = [
-                {
-                    "supplier_code": u.raw.supplier_code,
-                    "description": u.raw.description,
-                    "quantity": u.raw.quantity,
-                    "unit_cost": u.raw.unit_cost,
-                    "candidates": u.candidates,
-                    "reason": u.reason,
-                }
-                for u in mr.unmatched
-            ]
-        except LightspeedError as exc:
-            invoice.warnings.append(f"Matching failed: {exc}")
-    elif not supplier_id:
-        invoice.warnings.append(
-            f"Supplier '{invoice.supplier_name}' not found in Lightspeed; "
-            f"cannot match line items."
-        )
-
-    return {
-        "invoice": {
-            "supplier_name": invoice.supplier_name,
-            "supplier_id": supplier_id,
-            "invoice_number": invoice.invoice_number,
-            "invoice_date": invoice.invoice_date,
-            "currency": invoice.currency,
-            "subtotal": invoice.subtotal,
-            "tax": invoice.tax,
-            "total": invoice.total,
-        },
-        "matched": matched,
-        "unmatched": unmatched,
-        "warnings": invoice.warnings,
-        "summary": {
-            "total_lines": len(invoice.lines),
-            "matched_count": len(matched),
-            "unmatched_count": len(unmatched),
-        },
-    }
-
-
-# --------------------------------------------------------------------- #
-# Web UI                                                                #
+# HTML pages                                                            #
 # --------------------------------------------------------------------- #
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return _INDEX_HTML
+async def index(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(INDEX_HTML)
 
 
-_INDEX_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Invoice Importer</title>
-<style>
-  :root {
-    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c;
-    --border: #e7e5e4; --accent: #0c4a6e; --accent-soft: #f0f9ff;
-    --good: #166534; --warn: #92400e; --bad: #991b1b;
-    --good-bg: #f0fdf4; --warn-bg: #fffbeb; --bad-bg: #fef2f2;
-  }
-  * { box-sizing: border-box; }
-  body { font: 15px/1.5 system-ui, -apple-system, sans-serif;
-         color: var(--fg); background: var(--bg); margin: 0;
-         padding: 32px 16px; }
-  .container { max-width: 960px; margin: 0 auto; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
-  .subtitle { color: var(--muted); margin: 0 0 32px; font-size: 14px; }
-  .drop {
-    border: 2px dashed var(--border); border-radius: 12px;
-    padding: 48px 24px; text-align: center; cursor: pointer;
-    background: white; transition: all 0.15s ease;
-  }
-  .drop:hover, .drop.over {
-    border-color: var(--accent); background: var(--accent-soft);
-  }
-  .drop p { margin: 8px 0; color: var(--muted); }
-  .drop strong { color: var(--fg); }
-  .drop input { display: none; }
-  .status { margin-top: 24px; padding: 16px 20px; border-radius: 8px;
-            background: white; border: 1px solid var(--border); }
-  .status.hidden { display: none; }
-  .spinner {
-    display: inline-block; width: 14px; height: 14px;
-    border: 2px solid var(--border); border-top-color: var(--accent);
-    border-radius: 50%; animation: spin 0.8s linear infinite;
-    vertical-align: middle; margin-right: 8px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .results { margin-top: 24px; }
-  .results.hidden { display: none; }
-  .card { background: white; border: 1px solid var(--border);
-          border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-  .card h2 { margin: 0 0 12px; font-size: 16px; }
-  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 12px 24px; }
-  .meta div { font-size: 13px; }
-  .meta label { color: var(--muted); display: block; font-size: 12px; }
-  .meta span { font-weight: 500; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px;
-          margin-top: 8px; }
-  th, td { text-align: left; padding: 8px 12px;
-           border-bottom: 1px solid var(--border); }
-  th { font-weight: 600; color: var(--muted); font-size: 12px;
-       text-transform: uppercase; letter-spacing: 0.04em; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
-           font-size: 11px; font-weight: 600; text-transform: uppercase; }
-  .badge.mapping { background: #ede9fe; color: #5b21b6; }
-  .badge.sku { background: #dbeafe; color: #1e40af; }
-  .badge.barcode { background: #ccfbf1; color: #0f766e; }
-  .badge.fuzzy_name { background: #fef3c7; color: #92400e; }
-  .warnings { background: var(--warn-bg); border: 1px solid #fde68a;
-              color: var(--warn); padding: 12px 16px; border-radius: 8px;
-              margin-bottom: 16px; font-size: 13px; }
-  .warnings ul { margin: 4px 0 0; padding-left: 20px; }
-  .candidates { padding: 4px 0; font-size: 12px; color: var(--muted); }
-  .cand-btn {
-    display: inline-block; background: white; border: 1px solid var(--border);
-    border-radius: 4px; padding: 4px 8px; margin: 2px 4px 2px 0;
-    cursor: pointer; font-size: 12px; color: var(--fg);
-  }
-  .cand-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
-  .cand-btn.unmatch-skip { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
-  .actions { margin-top: 20px; display: flex; gap: 12px; align-items: center; }
-  button.primary {
-    background: var(--accent); color: white; border: none;
-    padding: 10px 20px; border-radius: 6px; font-size: 14px;
-    font-weight: 500; cursor: pointer;
-  }
-  button.primary:hover { background: #075985; }
-  button.primary:disabled { background: var(--muted); cursor: not-allowed; }
-  label.receive { display: inline-flex; align-items: center; gap: 8px;
-                  font-size: 13px; color: var(--muted); }
-  .success { background: var(--good-bg); border: 1px solid #bbf7d0;
-             color: var(--good); padding: 16px; border-radius: 8px; }
-  .error { background: var(--bad-bg); border: 1px solid #fecaca;
-           color: var(--bad); padding: 16px; border-radius: 8px; }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>Invoice Importer</h1>
-  <p class="subtitle">Drop a PDF invoice. We extract it, match line items
-  to Lightspeed products, and push it as a SUPPLIER consignment.</p>
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(HISTORY_HTML)
 
-  <label class="drop" id="drop">
-    <input type="file" id="file" accept="application/pdf" />
-    <p><strong>Drop a PDF here</strong> or click to select</p>
-    <p style="font-size: 12px;">Max 30 MB</p>
-  </label>
 
-  <div class="status hidden" id="status"></div>
-  <div class="results hidden" id="results"></div>
-</div>
+@app.get("/review/{invoice_id}", response_class=HTMLResponse)
+async def review_page(invoice_id: int, request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(REVIEW_HTML.replace("{{INVOICE_ID}}", str(invoice_id)))
 
-<script>
-const drop = document.getElementById('drop');
-const fileInput = document.getElementById('file');
-const statusEl = document.getElementById('status');
-const resultsEl = document.getElementById('results');
 
-let currentResult = null;
-let unmatchedDecisions = {};  // index -> {product_id, sku, name} or 'skip'
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(SETTINGS_HTML)
 
-drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
-drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-drop.addEventListener('drop', e => {
-  e.preventDefault();
-  drop.classList.remove('over');
-  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener('change', e => {
-  if (e.target.files[0]) handleFile(e.target.files[0]);
-});
 
-async function handleFile(file) {
-  if (!file.name.toLowerCase().endsWith('.pdf')) {
-    showStatus('Only PDF files are supported.', 'error');
-    return;
-  }
-  showStatus('<span class="spinner"></span>Extracting and matching... (10-30 seconds)');
-  resultsEl.classList.add('hidden');
-  currentResult = null;
-  unmatchedDecisions = {};
+# --------------------------------------------------------------------- #
+# Discovery                                                             #
+# --------------------------------------------------------------------- #
 
-  const form = new FormData();
-  form.append('file', file);
-  try {
-    const resp = await fetch('/invoices/process', { method: 'POST', body: form });
-    const data = await resp.json();
-    if (!resp.ok) {
-      showStatus('Error: ' + (data.detail || resp.statusText), 'error');
-      return;
-    }
-    currentResult = data;
-    statusEl.classList.add('hidden');
-    renderResults(data);
-  } catch (err) {
-    showStatus('Network error: ' + err.message, 'error');
-  }
-}
+@app.get("/outlets", dependencies=[Depends(require_auth)])
+async def list_outlets():
+    try:
+        outlets = await _client().list_outlets()
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"data": [{"id": o["id"], "name": o.get("name")} for o in outlets]}
 
-function showStatus(html, kind) {
-  statusEl.innerHTML = html;
-  statusEl.className = 'status' + (kind ? ' ' + kind : '');
-}
 
-function renderResults(data) {
-  const inv = data.invoice;
-  let html = '';
+@app.get("/suppliers", dependencies=[Depends(require_auth)])
+async def list_suppliers():
+    try:
+        suppliers = await _client().list_suppliers()
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"data": [{"id": s["id"], "name": s.get("name")} for s in suppliers]}
 
-  if (data.warnings && data.warnings.length) {
-    html += '<div class="warnings"><strong>Warnings</strong><ul>';
-    for (const w of data.warnings) html += '<li>' + escape(w) + '</li>';
-    html += '</ul></div>';
-  }
 
-  html += '<div class="card"><h2>Invoice</h2><div class="meta">';
-  html += metaRow('Supplier', inv.supplier_name || '—');
-  html += metaRow('Supplier ID', inv.supplier_id || 'not resolved');
-  html += metaRow('Invoice #', inv.invoice_number || '—');
-  html += metaRow('Date', inv.invoice_date || '—');
-  html += metaRow('Subtotal', fmtMoney(inv.subtotal, inv.currency));
-  html += metaRow('Total', fmtMoney(inv.total, inv.currency));
-  html += '</div></div>';
+# --------------------------------------------------------------------- #
+# Upload / process                                                      #
+# --------------------------------------------------------------------- #
 
-  if (data.matched.length) {
-    html += '<div class="card"><h2>Matched (' + data.matched.length + ')</h2>';
-    html += '<table><thead><tr><th>From invoice</th><th>Matched product</th>'
-         + '<th>How</th><th class="num">Qty</th><th class="num">Unit cost</th></tr></thead><tbody>';
-    for (const m of data.matched) {
-      html += '<tr>';
-      html += '<td>' + escape(m.supplier_code || m.description || '—') + '</td>';
-      html += '<td><strong>' + escape(m.product_name || '') + '</strong>'
-           + '<br><span style="color:var(--muted);font-size:12px">'
-           + escape(m.product_sku || '') + '</span></td>';
-      html += '<td><span class="badge ' + m.matched_by + '">'
-           + m.matched_by.replace('_', ' ') + '</span>'
-           + (m.confidence < 1 ? ' ' + Math.round(m.confidence * 100) + '%' : '')
-           + '</td>';
-      html += '<td class="num">' + m.quantity + '</td>';
-      html += '<td class="num">' + m.unit_cost.toFixed(2) + '</td>';
-      html += '</tr>';
-    }
-    html += '</tbody></table></div>';
-  }
+@app.post("/invoices/process", dependencies=[Depends(require_auth)])
+async def process_invoice(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(_session),
+):
+    """Upload PDF, extract, dedupe, match, price, store. Returns invoice_id."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported")
 
-  if (data.unmatched.length) {
-    html += '<div class="card"><h2>Unmatched — needs review (' + data.unmatched.length + ')</h2>';
-    html += '<p style="font-size:13px;color:var(--muted);margin-top:0">'
-         + 'Pick a candidate or skip the line. Picks are saved as permanent '
-         + 'mappings — next time this supplier sends this code, it\\'ll match automatically.</p>';
-    html += '<table><thead><tr><th>From invoice</th><th>Candidates</th>'
-         + '<th class="num">Qty</th><th class="num">Unit cost</th></tr></thead><tbody>';
-    data.unmatched.forEach((u, i) => {
-      html += '<tr id="u-row-' + i + '">';
-      html += '<td><strong>' + escape(u.description || '—') + '</strong>'
-           + (u.supplier_code ? '<br><span style="color:var(--muted);font-size:12px">'
-              + escape(u.supplier_code) + '</span>' : '') + '</td>';
-      html += '<td><div class="candidates" id="cand-' + i + '">';
-      if (u.candidates && u.candidates.length) {
-        for (const c of u.candidates) {
-          html += '<button class="cand-btn" onclick="pickCandidate(' + i
-               + ',\\'' + c.product_id + '\\',\\'' + escapeAttr(c.sku || '')
-               + '\\',\\'' + escapeAttr(c.name || '')
-               + '\\')">' + escape(c.name || '') + ' '
-               + '<span style="color:var(--muted)">('
-               + Math.round(c.confidence * 100) + '%)</span></button>';
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(400, "Empty file")
+    if len(pdf_bytes) > 30 * 1024 * 1024:
+        raise HTTPException(400, "PDF too large (max 30 MB)")
+
+    try:
+        extracted = await extract_invoice_from_pdf(pdf_bytes)
+    except ExtractionError as exc:
+        raise HTTPException(502, f"Extraction failed: {exc}")
+
+    # Resolve supplier
+    client = _client()
+    supplier_id: str | None = None
+    supplier_name = extracted.supplier_name
+    if supplier_name:
+        try:
+            sup = await client.find_supplier_by_name(supplier_name)
+            if not sup:
+                fuzzy = await client.search_suppliers(supplier_name)
+                if len(fuzzy) == 1:
+                    sup = fuzzy[0]
+                elif len(fuzzy) > 1:
+                    extracted.warnings.append(
+                        f"Supplier '{supplier_name}' matches {len(fuzzy)} "
+                        f"suppliers; pick one manually."
+                    )
+            if sup:
+                supplier_id = sup["id"]
+        except LightspeedError as exc:
+            extracted.warnings.append(f"Supplier lookup failed: {exc}")
+
+    # Dedupe check
+    if supplier_id and extracted.invoice_number:
+        existing = await find_existing_invoice(
+            session, supplier_id=supplier_id,
+            supplier_invoice_number=extracted.invoice_number,
+        )
+        if existing:
+            return {
+                "duplicate": True,
+                "existing_invoice_id": existing.id,
+                "existing_status": existing.status,
+                "consignment_id": existing.consignment_id,
+                "message": (
+                    f"This invoice (#{extracted.invoice_number} from "
+                    f"{supplier_name}) was already processed."
+                ),
+            }
+
+    # Create invoice row
+    invoice = Invoice(
+        filename=file.filename,
+        supplier_id=supplier_id,
+        supplier_name=supplier_name,
+        supplier_invoice_number=extracted.invoice_number,
+        invoice_date=extracted.invoice_date,
+        subtotal=extracted.subtotal,
+        tax=extracted.tax,
+        total=extracted.total,
+        page_count=extracted.page_count,
+        status="EXTRACTED",
+    )
+    session.add(invoice)
+    await session.flush()
+
+    # Match line items
+    matched_results: list = []
+    unmatched_results: list = []
+    if supplier_id and extracted.lines:
+        service = MatchingService(client, session)
+        raw = [
+            RawInvoiceLine(
+                supplier_code=l.supplier_code, description=l.description,
+                barcode=l.barcode, quantity=l.quantity, unit_cost=l.unit_cost,
+            )
+            for l in extracted.lines
+        ]
+        try:
+            mr = await service.match_invoice(supplier_id, raw)
+            matched_results = mr.matched
+            unmatched_results = mr.unmatched
+        except LightspeedError as exc:
+            extracted.warnings.append(f"Matching failed: {exc}")
+    elif not supplier_id:
+        extracted.warnings.append(
+            f"Supplier '{supplier_name}' not in Lightspeed; "
+            f"every line will need review."
+        )
+
+    # Price every line (matched and unmatched alike)
+    async def _price(supplier_code, barcode, description, cost):
+        try:
+            return await price_line(
+                session,
+                supplier_id=supplier_id,
+                supplier_code=supplier_code, barcode=barcode,
+                description=description, cost=cost,
+            )
+        except Exception as exc:  # never let pricing block a workflow
+            logger.warning("Pricing failed: %s", exc)
+            return PricingResult(price=None, source="none", notes=str(exc))
+
+    invoice_lines_for_db: list[InvoiceLine] = []
+    matched_payload: list[dict] = []
+    new_payload: list[dict] = []
+    uncertain_payload: list[dict] = []
+
+    for m in matched_results:
+        pr = await _price(
+            m.raw.supplier_code, m.raw.barcode, m.raw.description, m.raw.unit_cost,
+        )
+        meta = {
+            "matched_by": m.matched_by, "confidence": m.confidence,
+            "product_sku": m.product_sku, "product_name": m.product_name,
         }
-      } else {
-        html += '<span style="color:var(--muted)">no candidates</span>';
-      }
-      html += '<button class="cand-btn unmatch-skip" onclick="skipLine(' + i + ')">Skip</button>';
-      html += '</div></td>';
-      html += '<td class="num">' + u.quantity + '</td>';
-      html += '<td class="num">' + u.unit_cost.toFixed(2) + '</td>';
-      html += '</tr>';
-    });
-    html += '</tbody></table></div>';
-  }
+        line = InvoiceLine(
+            invoice_id=invoice.id,
+            supplier_code=m.raw.supplier_code, description=m.raw.description,
+            barcode=m.raw.barcode, quantity=m.raw.quantity,
+            unit_cost=m.raw.unit_cost, bucket="match",
+            lightspeed_product_id=m.product_id,
+            suggested_retail_price=pr.price,
+            pricing_source=pr.source, match_meta=meta,
+        )
+        invoice_lines_for_db.append(line)
+        matched_payload.append({
+            "supplier_code": m.raw.supplier_code, "description": m.raw.description,
+            "barcode": m.raw.barcode, "quantity": m.raw.quantity,
+            "unit_cost": m.raw.unit_cost, "product_id": m.product_id,
+            "product_sku": m.product_sku, "product_name": m.product_name,
+            "matched_by": m.matched_by, "confidence": m.confidence,
+            "suggested_retail_price": pr.price, "pricing_source": pr.source,
+            "pricing_notes": pr.notes,
+        })
 
-  html += '<div class="actions">';
-  html += '<label class="receive"><input type="checkbox" id="receive" /> '
-       + 'Mark as RECEIVED immediately (updates inventory)</label>';
-  html += '<button class="primary" id="importBtn" onclick="doImport()">'
-       + 'Import to Lightspeed</button>';
-  html += '</div>';
-  html += '<div id="importResult" style="margin-top:16px"></div>';
+    for u in unmatched_results:
+        pr = await _price(
+            u.raw.supplier_code, u.raw.barcode, u.raw.description, u.raw.unit_cost,
+        )
+        meta = {"candidates": u.candidates, "reason": u.reason}
+        line = InvoiceLine(
+            invoice_id=invoice.id,
+            supplier_code=u.raw.supplier_code, description=u.raw.description,
+            barcode=u.raw.barcode, quantity=u.raw.quantity,
+            unit_cost=u.raw.unit_cost, bucket="uncertain",
+            suggested_retail_price=pr.price,
+            pricing_source=pr.source, match_meta=meta,
+        )
+        invoice_lines_for_db.append(line)
+        uncertain_payload.append({
+            "supplier_code": u.raw.supplier_code, "description": u.raw.description,
+            "barcode": u.raw.barcode, "quantity": u.raw.quantity,
+            "unit_cost": u.raw.unit_cost, "candidates": u.candidates,
+            "reason": u.reason, "suggested_retail_price": pr.price,
+            "pricing_source": pr.source, "pricing_notes": pr.notes,
+        })
 
-  resultsEl.innerHTML = html;
-  resultsEl.classList.remove('hidden');
-  updateImportButton();
-}
+    session.add_all(invoice_lines_for_db)
 
-function metaRow(label, value) {
-  return '<div><label>' + label + '</label><span>' + escape(value) + '</span></div>';
-}
-
-function fmtMoney(n, cur) {
-  if (n == null) return '—';
-  return (cur ? cur + ' ' : '') + n.toFixed(2);
-}
-
-function escape(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[c]);
-}
-function escapeAttr(s) { return String(s == null ? '' : s).replace(/'/g, "\\\\'"); }
-
-async function pickCandidate(idx, productId, sku, name) {
-  const u = currentResult.unmatched[idx];
-  // Save the mapping if supplier_code is present, so it's automatic next time.
-  if (u.supplier_code && currentResult.invoice.supplier_id) {
-    try {
-      await fetch('/mappings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          supplier_id: currentResult.invoice.supplier_id,
-          supplier_code: u.supplier_code,
-          lightspeed_product_id: productId,
-          lightspeed_sku: sku,
-          product_name: name,
-        }),
-      });
-    } catch (e) { console.warn('Failed to save mapping', e); }
-  }
-  unmatchedDecisions[idx] = {product_id: productId, sku, name};
-  const cand = document.getElementById('cand-' + idx);
-  cand.innerHTML = '<span style="color:var(--good);font-weight:500">✓ '
-                 + escape(name) + '</span> '
-                 + '<button class="cand-btn" onclick="resetLine(' + idx + ')">change</button>';
-  updateImportButton();
-}
-function skipLine(idx) {
-  unmatchedDecisions[idx] = 'skip';
-  const cand = document.getElementById('cand-' + idx);
-  cand.innerHTML = '<span style="color:var(--muted)">skipped</span> '
-                 + '<button class="cand-btn" onclick="resetLine(' + idx + ')">undo</button>';
-  updateImportButton();
-}
-function resetLine(idx) {
-  delete unmatchedDecisions[idx];
-  renderResults(currentResult);  // re-render to restore candidate buttons
-}
-
-function updateImportButton() {
-  const btn = document.getElementById('importBtn');
-  if (!btn) return;
-  const unmatched = currentResult.unmatched || [];
-  const undecided = unmatched.filter((_, i) => !(i in unmatchedDecisions)).length;
-  if (undecided > 0) {
-    btn.disabled = true;
-    btn.textContent = 'Resolve ' + undecided + ' unmatched line(s) first';
-  } else {
-    btn.disabled = false;
-    btn.textContent = 'Import to Lightspeed';
-  }
-}
-
-async function doImport() {
-  const inv = currentResult.invoice;
-  if (!inv.supplier_id) { alert('No supplier resolved; cannot import.'); return; }
-  if (!inv.invoice_number) { alert('No invoice number; cannot import.'); return; }
-
-  const items = currentResult.matched.map(m => ({
-    product_id: m.product_id, count: m.quantity, cost: m.unit_cost,
-  }));
-  currentResult.unmatched.forEach((u, i) => {
-    const d = unmatchedDecisions[i];
-    if (d && d !== 'skip') {
-      items.push({product_id: d.product_id, count: u.quantity, cost: u.unit_cost});
+    # Cache full payload for the review page
+    invoice.extraction_json = {
+        "invoice": {
+            "supplier_name": supplier_name, "supplier_id": supplier_id,
+            "invoice_number": extracted.invoice_number,
+            "invoice_date": extracted.invoice_date,
+            "currency": extracted.currency, "subtotal": extracted.subtotal,
+            "tax": extracted.tax, "total": extracted.total,
+            "page_count": extracted.page_count,
+        },
+        "matched": matched_payload,
+        "new": new_payload,        # populated when user marks "create new"
+        "uncertain": uncertain_payload,
+        "warnings": extracted.warnings,
     }
-  });
 
-  if (items.length === 0) {
-    alert('No items to import.');
-    return;
-  }
-
-  const btn = document.getElementById('importBtn');
-  btn.disabled = true; btn.textContent = 'Importing...';
-
-  try {
-    const resp = await fetch('/invoices/import', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        supplier_invoice_number: inv.invoice_number,
-        supplier_id: inv.supplier_id,
-        items,
-        receive_immediately: document.getElementById('receive').checked,
-      }),
-    });
-    const data = await resp.json();
-    const out = document.getElementById('importResult');
-    if (resp.ok) {
-      out.innerHTML = '<div class="success">✓ Imported as consignment '
-                    + '<code>' + data.consignment_id + '</code> '
-                    + '(status: ' + data.status + ', '
-                    + data.items_added + ' items added)</div>';
-    } else {
-      out.innerHTML = '<div class="error">Import failed: '
-                    + escape(data.detail || resp.statusText) + '</div>';
-      btn.disabled = false; btn.textContent = 'Retry import';
+    return {
+        "duplicate": False,
+        "invoice_id": invoice.id,
+        "summary": {
+            "lines": len(extracted.lines),
+            "matched": len(matched_payload),
+            "uncertain": len(uncertain_payload),
+        },
+        "redirect": f"/review/{invoice.id}",
     }
-  } catch (err) {
-    document.getElementById('importResult').innerHTML =
-      '<div class="error">Network error: ' + escape(err.message) + '</div>';
-    btn.disabled = false; btn.textContent = 'Retry import';
-  }
-}
-</script>
-</body>
-</html>"""
+
+
+# --------------------------------------------------------------------- #
+# Review data + decisions                                               #
+# --------------------------------------------------------------------- #
+
+@app.get("/invoices/{invoice_id}", dependencies=[Depends(require_auth)])
+async def get_invoice(
+    invoice_id: int, session: AsyncSession = Depends(_session),
+):
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    return {
+        "id": invoice.id, "status": invoice.status,
+        "filename": invoice.filename, "consignment_id": invoice.consignment_id,
+        "created_at": invoice.created_at.isoformat(),
+        "data": invoice.extraction_json,
+        "error": invoice.error,
+    }
+
+
+class LineDecision(BaseModel):
+    """One per uncertain or new line in the review screen."""
+    supplier_code: str | None = None
+    description: str | None = None
+    barcode: str | None = None
+    quantity: float
+    unit_cost: float
+    decision: str  # 'match_existing' | 'create_new' | 'skip'
+    # For match_existing:
+    lightspeed_product_id: str | None = None
+    # For create_new:
+    new_product_name: str | None = None
+    new_product_sku: str | None = None
+    new_retail_price: float | None = None
+    # Always:
+    retail_price_override: float | None = None  # for updating existing products
+
+
+class FinalizeRequest(BaseModel):
+    invoice_id: int
+    receive_immediately: bool = False
+    update_costs_for_existing: bool = True
+    # Decisions for uncertain/new lines, keyed by index into the uncertain list
+    decisions: list[LineDecision] = Field(default_factory=list)
+    # Per-matched-line retail price overrides, keyed by index into matched list
+    matched_overrides: dict[int, float] = Field(default_factory=dict)
+
+
+@app.post("/invoices/finalize", dependencies=[Depends(require_auth)])
+async def finalize_invoice(
+    body: FinalizeRequest, session: AsyncSession = Depends(_session),
+):
+    """Apply decisions, create/update products, push consignment to Lightspeed."""
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == body.invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if invoice.status == "IMPORTED":
+        raise HTTPException(409, "Invoice already imported")
+    if not invoice.supplier_id:
+        raise HTTPException(400, "Invoice has no supplier_id")
+    if not invoice.supplier_invoice_number:
+        raise HTTPException(400, "Invoice has no invoice number")
+
+    client = _client()
+    outlet_id = DEFAULT_OUTLET_ID
+    if not outlet_id:
+        outlets = await client.list_outlets()
+        if outlets:
+            outlet_id = outlets[0]["id"]
+    if not outlet_id:
+        raise HTTPException(400, "No outlet_id available")
+
+    data = invoice.extraction_json or {}
+    matched: list[dict] = list(data.get("matched", []))
+    uncertain: list[dict] = list(data.get("uncertain", []))
+
+    items_for_lightspeed: list[MatchedLineItem] = []
+    products_created: list[dict] = []
+    products_updated: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[str] = []
+
+    # 1. Matched lines: optionally update existing product costs, queue for consignment
+    for idx, m in enumerate(matched):
+        if body.update_costs_for_existing:
+            try:
+                retail = body.matched_overrides.get(str(idx)) \
+                    or body.matched_overrides.get(idx) \
+                    or m.get("suggested_retail_price")
+                upd = {}
+                if retail is not None:
+                    upd["retail_price"] = float(retail)
+                upd["supply_price"] = float(m["unit_cost"])
+                await client.update_product(m["product_id"], **upd)
+                products_updated.append({
+                    "product_id": m["product_id"],
+                    "name": m.get("product_name"),
+                    "new_supply_price": m["unit_cost"],
+                    "new_retail_price": retail,
+                })
+            except LightspeedError as exc:
+                errors.append(f"Failed to update {m.get('product_name')}: {exc}")
+
+        items_for_lightspeed.append(MatchedLineItem(
+            product_id=m["product_id"],
+            count=float(m["quantity"]), cost=float(m["unit_cost"]),
+        ))
+
+    # 2. Decisions for uncertain lines
+    for dec in body.decisions:
+        if dec.decision == "skip":
+            skipped.append({"description": dec.description, "reason": "user skipped"})
+            continue
+
+        if dec.decision == "match_existing":
+            if not dec.lightspeed_product_id:
+                errors.append(f"Skipped {dec.description}: no product chosen")
+                continue
+            # Save mapping for next time
+            if dec.supplier_code and invoice.supplier_id:
+                await upsert_mapping(
+                    session,
+                    supplier_id=invoice.supplier_id,
+                    supplier_code=dec.supplier_code,
+                    lightspeed_product_id=dec.lightspeed_product_id,
+                    lightspeed_sku=None,
+                    product_name=dec.description,
+                )
+            if body.update_costs_for_existing:
+                try:
+                    upd = {"supply_price": dec.unit_cost}
+                    if dec.retail_price_override is not None:
+                        upd["retail_price"] = dec.retail_price_override
+                    await client.update_product(dec.lightspeed_product_id, **upd)
+                    products_updated.append({
+                        "product_id": dec.lightspeed_product_id,
+                        "name": dec.description,
+                        "new_supply_price": dec.unit_cost,
+                        "new_retail_price": dec.retail_price_override,
+                    })
+                except LightspeedError as exc:
+                    errors.append(f"Failed to update: {exc}")
+
+            items_for_lightspeed.append(MatchedLineItem(
+                product_id=dec.lightspeed_product_id,
+                count=dec.quantity, cost=dec.unit_cost,
+            ))
+            continue
+
+        if dec.decision == "create_new":
+            if not dec.new_product_name:
+                errors.append("Skipped a create_new: no product name given")
+                continue
+            try:
+                created = await client.create_product(
+                    name=dec.new_product_name,
+                    sku=dec.new_product_sku,
+                    supplier_id=invoice.supplier_id,
+                    supplier_code=dec.supplier_code,
+                    barcode=dec.barcode,
+                    supply_price=dec.unit_cost,
+                    retail_price=dec.new_retail_price,
+                )
+                new_id = created.get("id")
+                if not new_id:
+                    errors.append(
+                        f"create_product returned no id for {dec.new_product_name}"
+                    )
+                    continue
+                products_created.append({
+                    "product_id": new_id, "name": dec.new_product_name,
+                    "sku": dec.new_product_sku, "supply_price": dec.unit_cost,
+                    "retail_price": dec.new_retail_price,
+                })
+                # Save mapping for next time
+                if dec.supplier_code and invoice.supplier_id:
+                    await upsert_mapping(
+                        session,
+                        supplier_id=invoice.supplier_id,
+                        supplier_code=dec.supplier_code,
+                        lightspeed_product_id=new_id,
+                        lightspeed_sku=dec.new_product_sku,
+                        product_name=dec.new_product_name,
+                    )
+                items_for_lightspeed.append(MatchedLineItem(
+                    product_id=new_id, count=dec.quantity, cost=dec.unit_cost,
+                ))
+            except LightspeedError as exc:
+                errors.append(f"Failed to create {dec.new_product_name}: {exc}")
+            continue
+
+        errors.append(f"Unknown decision type: {dec.decision}")
+
+    if not items_for_lightspeed:
+        invoice.status = "FAILED"
+        invoice.error = "No items to import after decisions applied"
+        raise HTTPException(400, "No items to import")
+
+    # 3. Push consignment
+    try:
+        result = await client.import_invoice(
+            outlet_id=outlet_id,
+            supplier_id=invoice.supplier_id,
+            supplier_invoice_number=invoice.supplier_invoice_number,
+            items=items_for_lightspeed,
+            receive_immediately=body.receive_immediately,
+            name=f"Invoice {invoice.supplier_invoice_number}",
+        )
+    except LightspeedError as exc:
+        invoice.status = "FAILED"
+        invoice.error = str(exc)
+        raise HTTPException(502, str(exc)) from exc
+
+    invoice.status = "IMPORTED"
+    invoice.consignment_id = result["consignment_id"]
+
+    return {
+        "ok": True,
+        "consignment_id": result["consignment_id"],
+        "status": result["status"],
+        "items_added": result["items_added"],
+        "items_failed": result["items_failed"],
+        "products_created": products_created,
+        "products_updated": products_updated,
+        "skipped": skipped,
+        "errors": errors + result.get("errors", []),
+    }
+
+
+# --------------------------------------------------------------------- #
+# History                                                               #
+# --------------------------------------------------------------------- #
+
+@app.get("/invoices", dependencies=[Depends(require_auth)])
+async def list_invoices(
+    limit: int = 50, session: AsyncSession = Depends(_session),
+):
+    rows = (await session.execute(
+        select(Invoice).order_by(Invoice.created_at.desc()).limit(limit)
+    )).scalars().all()
+    return {"data": [{
+        "id": r.id, "filename": r.filename,
+        "supplier_name": r.supplier_name,
+        "supplier_invoice_number": r.supplier_invoice_number,
+        "invoice_date": r.invoice_date, "total": r.total,
+        "status": r.status, "consignment_id": r.consignment_id,
+        "created_at": r.created_at.isoformat(),
+    } for r in rows]}
+
+
+# --------------------------------------------------------------------- #
+# CSV export (backup)                                                   #
+# --------------------------------------------------------------------- #
+
+@app.get("/invoices/{invoice_id}/csv", dependencies=[Depends(require_auth)])
+async def export_csv(
+    invoice_id: int, session: AsyncSession = Depends(_session),
+):
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+
+    lines = (await session.execute(
+        select(InvoiceLine).where(InvoiceLine.invoice_id == invoice_id)
+    )).scalars().all()
+
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow([
+        "Supplier", "Invoice #", "Invoice date",
+        "Supplier code", "Description", "Barcode",
+        "Quantity", "Unit cost",
+        "Bucket", "Lightspeed product id",
+        "Suggested retail", "Pricing source",
+    ])
+    for l in lines:
+        w.writerow([
+            invoice.supplier_name or "",
+            invoice.supplier_invoice_number or "",
+            invoice.invoice_date or "",
+            l.supplier_code or "", l.description or "", l.barcode or "",
+            l.quantity, l.unit_cost,
+            l.bucket, l.lightspeed_product_id or "",
+            l.suggested_retail_price if l.suggested_retail_price is not None else "",
+            l.pricing_source or "",
+        ])
+
+    filename = f"invoice-{invoice_id}.csv"
+    return Response(
+        content=out.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# --------------------------------------------------------------------- #
+# Product lookup (used by the review UI's manual-pick feature)          #
+# --------------------------------------------------------------------- #
+
+@app.get("/products/search", dependencies=[Depends(require_auth)])
+async def search_products(q: str):
+    """Search products by name (for manual selection in the review UI)."""
+    try:
+        # X-Series supports `?search=` on /products
+        data = await _client()._request(
+            "GET", "/products",
+            params={"search": q, "page_size": 20},
+        )
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"data": [{
+        "id": p["id"], "name": p.get("name"), "sku": p.get("sku"),
+        "supply_price": p.get("supply_price"),
+    } for p in data.get("data", [])]}
+
+
+# --------------------------------------------------------------------- #
+# Pricing rules CRUD (for settings page)                                #
+# --------------------------------------------------------------------- #
+
+@app.get("/pricing/rules", dependencies=[Depends(require_auth)])
+async def list_rules(session: AsyncSession = Depends(_session)):
+    rows = (await session.execute(
+        select(PricingRule).order_by(PricingRule.priority.asc())
+    )).scalars().all()
+    return {"data": [{
+        "id": r.id, "name": r.name, "keywords": r.keywords,
+        "multiplier": r.multiplier, "rounding": r.rounding,
+        "priority": r.priority, "enabled": r.enabled,
+    } for r in rows]}
+
+
+class RuleIn(BaseModel):
+    name: str
+    keywords: str | None = None
+    multiplier: float
+    rounding: str = "charm"
+    priority: int = 100
+    enabled: bool = True
+
+
+@app.post("/pricing/rules", dependencies=[Depends(require_auth)])
+async def create_rule(body: RuleIn, session: AsyncSession = Depends(_session)):
+    rule = PricingRule(**body.dict())
+    session.add(rule)
+    await session.flush()
+    return {"id": rule.id}
+
+
+@app.delete("/pricing/rules/{rule_id}", dependencies=[Depends(require_auth)])
+async def delete_rule(rule_id: int, session: AsyncSession = Depends(_session)):
+    rule = (await session.execute(
+        select(PricingRule).where(PricingRule.id == rule_id)
+    )).scalar_one_or_none()
+    if rule:
+        await session.delete(rule)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------- #
+# MSRP upload (CSV) per supplier                                        #
+# --------------------------------------------------------------------- #
+
+@app.post("/pricing/msrp", dependencies=[Depends(require_auth)])
+async def upload_msrp(
+    supplier_id: str = Form(...),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(_session),
+):
+    """Upload an MSRP CSV. Columns: supplier_code, barcode, msrp, notes (any
+    subset; one of supplier_code or barcode is required)."""
+    text = (await file.read()).decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    added = 0
+    errors = []
+    for i, row in enumerate(reader, start=2):
+        code = (row.get("supplier_code") or "").strip() or None
+        barcode = (row.get("barcode") or "").strip() or None
+        if not code and not barcode:
+            errors.append(f"Row {i}: needs supplier_code or barcode")
+            continue
+        try:
+            msrp = float(str(row.get("msrp") or "").replace("$", "").replace(",", ""))
+        except ValueError:
+            errors.append(f"Row {i}: invalid msrp")
+            continue
+        session.add(SupplierMsrp(
+            supplier_id=supplier_id, supplier_code=code, barcode=barcode,
+            msrp=msrp, notes=(row.get("notes") or "").strip() or None,
+        ))
+        added += 1
+    return {"added": added, "errors": errors}
+
+
+# --------------------------------------------------------------------- #
+# Direct API endpoints retained                                         #
+# --------------------------------------------------------------------- #
+
+@app.get("/consignments/{consignment_id}", dependencies=[Depends(require_auth)])
+async def get_consignment(consignment_id: str):
+    try:
+        return await _client().get_consignment(consignment_id)
+    except LightspeedNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc

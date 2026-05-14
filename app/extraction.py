@@ -27,6 +27,11 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1/messages"
 
 EXTRACTION_PROMPT = """You are extracting data from a supplier invoice for a retail business.
 
+CRITICAL: This invoice may span multiple pages. You MUST process EVERY page
+and include EVERY line item in your output. Do not summarize, abbreviate,
+or skip any items. If the invoice has 80 line items across 4 pages, your
+output must contain all 80 line items.
+
 Return a single JSON object with this exact schema and no other text:
 
 {
@@ -37,6 +42,7 @@ Return a single JSON object with this exact schema and no other text:
   "subtotal": number or null,
   "tax": number or null,
   "total": number or null,
+  "page_count": number,
   "lines": [
     {
       "supplier_code": "the SKU/part-number/code for this line item, or null",
@@ -50,13 +56,17 @@ Return a single JSON object with this exact schema and no other text:
 }
 
 Rules:
+- Include EVERY product line from EVERY page. The `lines` array must have
+  one entry for each line item on the invoice, no exceptions.
+- `page_count` is the total number of pages you processed.
 - unit_cost is the per-unit price BEFORE tax, after any line-item discount.
-- If quantity and line_total are shown but unit_cost is not, compute it.
-- Skip non-product lines (shipping, tax, discounts at invoice level) — they
+- If quantity and line_total are shown but unit_cost is not, compute it
+  as line_total / quantity.
+- Skip non-product lines (shipping, tax, invoice-level discounts) — they
   belong in `tax` or are implicit in `total`, not in `lines`.
 - For numbers, never include currency symbols or thousands separators.
 - If a field is genuinely missing from the invoice, use null. Don't guess.
-- Return ONLY the JSON object. No prose, no markdown fences."""
+- Return ONLY the JSON object. No prose, no markdown fences, no preamble."""
 
 
 class ExtractionError(Exception):
@@ -84,6 +94,7 @@ class ExtractedInvoice:
     total: float | None
     lines: list[ExtractedLine]
     warnings: list[str]
+    page_count: int | None = None
 
 
 async def extract_invoice_from_pdf(pdf_bytes: bytes) -> ExtractedInvoice:
@@ -97,7 +108,9 @@ async def extract_invoice_from_pdf(pdf_bytes: bytes) -> ExtractedInvoice:
 
     payload = {
         "model": ANTHROPIC_MODEL,
-        "max_tokens": 4096,
+        # Big invoices can have 100+ line items; budget enough output tokens.
+        # Each line item is ~50 tokens of JSON, so 16k handles ~250 lines.
+        "max_tokens": 16000,
         "messages": [
             {
                 "role": "user",
@@ -116,7 +129,7 @@ async def extract_invoice_from_pdf(pdf_bytes: bytes) -> ExtractedInvoice:
         ],
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(
             ANTHROPIC_BASE_URL,
             headers={
@@ -133,9 +146,21 @@ async def extract_invoice_from_pdf(pdf_bytes: bytes) -> ExtractedInvoice:
         )
 
     data = resp.json()
+    stop_reason = data.get("stop_reason")
     text = _extract_text(data)
     parsed = _parse_json(text)
-    return _to_invoice(parsed)
+    invoice = _to_invoice(parsed)
+
+    # If the model hit the output cap, JSON is likely truncated and some
+    # lines were lost. Surface this loudly so the user doesn't import a
+    # partial invoice.
+    if stop_reason == "max_tokens":
+        invoice.warnings.append(
+            "Extraction hit the output token limit — invoice may have more "
+            "line items than were captured. Verify totals before importing."
+        )
+
+    return invoice
 
 
 def _extract_text(api_response: dict) -> str:
@@ -202,6 +227,7 @@ def _to_invoice(parsed: dict) -> ExtractedInvoice:
         total=_num(parsed.get("total")),
         lines=lines,
         warnings=warnings,
+        page_count=int(parsed["page_count"]) if parsed.get("page_count") else None,
     )
 
     # Sanity check: do line totals add up to subtotal? This catches the
