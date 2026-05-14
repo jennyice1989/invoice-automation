@@ -18,6 +18,20 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _is_live_product(product: dict) -> bool:
+    """True if the product can be updated/used (not deleted, not inactive).
+
+    /search endpoint returns deleted and inactive products in results, but
+    PUT/POST against them returns 404. Filter aggressively client-side.
+    """
+    if product.get("deleted_at"):
+        return False
+    # X-Series uses `active: True/False` on products
+    if product.get("active") is False:
+        return False
+    return True
+
+
 class LightspeedError(Exception):
     """Base error for Lightspeed API failures."""
 
@@ -211,10 +225,8 @@ class LightspeedClient:
     async def find_product_by_sku(self, sku: str) -> dict | None:
         """Find a product by exact SKU using the /search endpoint.
 
-        The list-products `?sku=` parameter has been observed to return
-        non-matching results (treating absent matches as a default
-        product). The dedicated /search endpoint with type=products is
-        the documented exact-match path. SKU values must be lowercased.
+        Filters out deleted/inactive products — these can appear in
+        search results but cannot be updated (PUT returns 404).
         """
         if not sku:
             return None
@@ -228,19 +240,18 @@ class LightspeedClient:
             },
         )
         items = data.get("data", [])
-        # Defensive: verify the returned item's SKU actually matches.
-        # If /search ever returns broader results, this filters them.
         needle = sku.lower()
         for item in items:
-            if (item.get("sku") or "").lower() == needle:
-                return item
+            if (item.get("sku") or "").lower() != needle:
+                continue
+            if not _is_live_product(item):
+                continue
+            return item
         return None
 
     async def find_product_by_supplier_code(
         self, supplier_code: str
     ) -> dict | None:
-        """Find a product by supplier_code. Falls back to list-products
-        since /search doesn't index supplier_code as a search field."""
         if not supplier_code:
             return None
         data = await self._request(
@@ -248,15 +259,16 @@ class LightspeedClient:
             "/products",
             params={"supplier_code": supplier_code, "page_size": 5},
         )
-        # Same defense as SKU: verify exact match before trusting result.
         needle = supplier_code.strip().lower()
         for item in data.get("data", []):
-            if (item.get("supplier_code") or "").strip().lower() == needle:
-                return item
+            if (item.get("supplier_code") or "").strip().lower() != needle:
+                continue
+            if not _is_live_product(item):
+                continue
+            return item
         return None
 
     async def find_product_by_barcode(self, barcode: str) -> dict | None:
-        """Find a product by exact barcode."""
         if not barcode:
             return None
         data = await self._request(
@@ -271,11 +283,16 @@ class LightspeedClient:
         needle = barcode.strip()
         for item in data.get("data", []):
             pb = item.get("barcode")
+            matched = False
             if isinstance(pb, list):
-                if needle in pb:
-                    return item
-            elif (pb or "").strip() == needle:
-                return item
+                matched = needle in pb
+            else:
+                matched = (pb or "").strip() == needle
+            if not matched:
+                continue
+            if not _is_live_product(item):
+                continue
+            return item
         return None
 
     # ------------------------------------------------------------------ #
@@ -421,8 +438,13 @@ class LightspeedClient:
         retail_price: float | None = None,
         supply_price: float | None = None,
         supplier_code: str | None = None,
-    ) -> dict:
-        """Update select fields on an existing product."""
+    ) -> dict | None:
+        """Update select fields on an existing product.
+
+        Returns None if the product can't be updated (404). This is a soft
+        failure — the consignment can still proceed; we just couldn't
+        refresh prices on the existing product.
+        """
         payload: dict[str, Any] = {}
         if retail_price is not None:
             payload["price_excluding_tax"] = retail_price
@@ -432,12 +454,19 @@ class LightspeedClient:
             payload["supplier_code"] = supplier_code
 
         if not payload:
-            return {}
+            return None
 
-        data = await self._request(
-            "PUT", f"/products/{product_id}", json=payload
-        )
-        return data.get("data", data)
+        try:
+            data = await self._request(
+                "PUT", f"/products/{product_id}", json=payload
+            )
+            return data.get("data", data)
+        except LightspeedNotFoundError:
+            logger.warning(
+                "Skipping update for product %s (404 — likely deleted)",
+                product_id,
+            )
+            return None
 
     # ------------------------------------------------------------------ #
     # High-level: push a complete invoice                                #

@@ -75,6 +75,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Invoice Importer", version="1.0.0", lifespan=lifespan)
 
 
+@app.exception_handler(Exception)
+async def _log_unhandled(request: Request, exc: Exception):
+    """Ensure every unhandled exception is logged with a full traceback.
+    FastAPI's default logging can swallow these on some configurations."""
+    import traceback
+    from fastapi.responses import JSONResponse
+    tb = traceback.format_exc()
+    logger.error(
+        "Unhandled exception on %s %s:\n%s",
+        request.method, request.url.path, tb,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {exc}",
+            "path": str(request.url.path),
+        },
+    )
+
+
 def _client() -> LightspeedClient:
     client = getattr(app.state, "lightspeed", None)
     if client is None:
@@ -482,15 +502,28 @@ async def finalize_invoice(
                 if retail is not None:
                     upd["retail_price"] = float(retail)
                 upd["supply_price"] = float(m["unit_cost"])
-                await client.update_product(m["product_id"], **upd)
-                products_updated.append({
-                    "product_id": m["product_id"],
-                    "name": m.get("product_name"),
-                    "new_supply_price": m["unit_cost"],
-                    "new_retail_price": retail,
-                })
+                result = await client.update_product(m["product_id"], **upd)
+                if result is None:
+                    # Update was skipped (e.g., 404) — note it but proceed.
+                    errors.append(
+                        f"Could not update prices on {m.get('product_name')} "
+                        f"(product may be archived); consignment will still include it."
+                    )
+                else:
+                    products_updated.append({
+                        "product_id": m["product_id"],
+                        "name": m.get("product_name"),
+                        "new_supply_price": m["unit_cost"],
+                        "new_retail_price": retail,
+                    })
             except LightspeedError as exc:
                 errors.append(f"Failed to update {m.get('product_name')}: {exc}")
+            except Exception as exc:
+                # Pricing-update issues should never block import.
+                logger.exception("Unexpected error updating matched product")
+                errors.append(
+                    f"Unexpected error updating {m.get('product_name')}: {exc}"
+                )
 
         items_for_lightspeed.append(MatchedLineItem(
             product_id=m["product_id"],

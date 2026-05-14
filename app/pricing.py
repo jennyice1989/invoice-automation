@@ -3,7 +3,8 @@ Pricing engine.
 
 Strategy: try sources in order, first non-null wins.
   1. MSRP from supplier price list (if uploaded)
-  2. Web scrape Chewy/Petco/PetSmart non-sale price (best effort)
+  2. Web scrape Chewy/Petco/PetSmart non-sale price (DISABLED by default —
+     these sites block cloud IPs aggressively. Set ENABLE_SCRAPING=1 to try.)
   3. Rules engine: cost * markup, rounded
 
 Returns the price and a source tag so the UI can show how it was derived
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -26,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import PricingRule, find_msrp
 
 logger = logging.getLogger(__name__)
+
+ENABLE_SCRAPING = os.environ.get("ENABLE_SCRAPING", "").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -209,8 +213,8 @@ async def price_line(
                 notes=msrp.notes or "From uploaded MSRP list",
             )
 
-    # 2. Scrape (best effort)
-    if try_scrape and description:
+    # 2. Scrape (best effort) — only if explicitly enabled
+    if try_scrape and ENABLE_SCRAPING and description:
         source, price, data = await _try_scrape(description)
         if source and price:
             return PricingResult(
