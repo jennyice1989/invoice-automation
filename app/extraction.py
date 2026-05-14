@@ -32,6 +32,26 @@ and include EVERY line item in your output. Do not summarize, abbreviate,
 or skip any items. If the invoice has 80 line items across 4 pages, your
 output must contain all 80 line items.
 
+For each line item, the invoice typically has multiple identifier columns.
+You must distinguish them carefully:
+
+- **barcode** (CRITICAL — this is the primary match key): the UPC/EAN
+  barcode. Always exactly 12 or 13 digits. Often labeled "UPC", "EAN",
+  "Barcode", or shown as a barcode image number. If the invoice shows
+  any 12-13 digit numeric code per line, that's almost certainly the
+  barcode — capture it. Some invoices show UPCs without a column header.
+- **supplier_code**: the SKU / item number / part number the supplier
+  uses. Typically 5–10 alphanumeric characters. Often labeled "Item #",
+  "SKU", "Product Code", "Item Code", "Stock #", or "Part #".
+- **NOT supplier_code, NOT barcode**: line numbers (1, 2, 3...), order
+  numbers, PO references, lot numbers, or anything that varies between
+  invoices for the same product.
+
+If a line has both a short alphanumeric code AND a 12-13 digit number,
+put the short code in supplier_code and the 12-13 digit number in
+barcode. NEVER put a 12-13 digit UPC in supplier_code — it belongs in
+barcode. The barcode is more valuable for matching than supplier_code.
+
 Return a single JSON object with this exact schema and no other text:
 
 {
@@ -45,9 +65,9 @@ Return a single JSON object with this exact schema and no other text:
   "page_count": number,
   "lines": [
     {
-      "supplier_code": "the SKU/part-number/code for this line item, or null",
+      "supplier_code": "the product SKU/item code, or null",
       "description": "the product description as printed",
-      "barcode": "UPC/EAN/barcode if shown, else null",
+      "barcode": "12-13 digit UPC/EAN if shown, else null",
       "quantity": number,
       "unit_cost": number,
       "line_total": number or null

@@ -209,28 +209,74 @@ class LightspeedClient:
         return None
 
     async def find_product_by_sku(self, sku: str) -> dict | None:
-        """Find a product by its SKU (Lightspeed's internal product code)."""
+        """Find a product by exact SKU using the /search endpoint.
+
+        The list-products `?sku=` parameter has been observed to return
+        non-matching results (treating absent matches as a default
+        product). The dedicated /search endpoint with type=products is
+        the documented exact-match path. SKU values must be lowercased.
+        """
+        if not sku:
+            return None
         data = await self._request(
-            "GET", "/products", params={"sku": sku, "page_size": 1}
+            "GET",
+            "/search",
+            params={
+                "type": "products",
+                "sku": sku.lower(),
+                "page_size": 5,
+            },
         )
         items = data.get("data", [])
-        return items[0] if items else None
+        # Defensive: verify the returned item's SKU actually matches.
+        # If /search ever returns broader results, this filters them.
+        needle = sku.lower()
+        for item in items:
+            if (item.get("sku") or "").lower() == needle:
+                return item
+        return None
 
     async def find_product_by_supplier_code(
         self, supplier_code: str
     ) -> dict | None:
-        """
-        Find a product by supplier_code — the SKU the supplier uses, which
-        is what appears on their invoices. This is the *primary* matching
-        key for invoice import.
-        """
+        """Find a product by supplier_code. Falls back to list-products
+        since /search doesn't index supplier_code as a search field."""
+        if not supplier_code:
+            return None
         data = await self._request(
             "GET",
             "/products",
-            params={"supplier_code": supplier_code, "page_size": 1},
+            params={"supplier_code": supplier_code, "page_size": 5},
         )
-        items = data.get("data", [])
-        return items[0] if items else None
+        # Same defense as SKU: verify exact match before trusting result.
+        needle = supplier_code.strip().lower()
+        for item in data.get("data", []):
+            if (item.get("supplier_code") or "").strip().lower() == needle:
+                return item
+        return None
+
+    async def find_product_by_barcode(self, barcode: str) -> dict | None:
+        """Find a product by exact barcode."""
+        if not barcode:
+            return None
+        data = await self._request(
+            "GET",
+            "/search",
+            params={
+                "type": "products",
+                "barcode": barcode,
+                "page_size": 5,
+            },
+        )
+        needle = barcode.strip()
+        for item in data.get("data", []):
+            pb = item.get("barcode")
+            if isinstance(pb, list):
+                if needle in pb:
+                    return item
+            elif (pb or "").strip() == needle:
+                return item
+        return None
 
     # ------------------------------------------------------------------ #
     # Consignment workflow                                               #

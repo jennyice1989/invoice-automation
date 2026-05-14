@@ -125,12 +125,13 @@ class MatchingService:
         line: RawInvoiceLine,
         supplier_products: list[dict],
     ) -> MatchedLine | UnmatchedLine:
-        # Tier 1: saved mapping
-        if line.supplier_code:
+        # Tier 1: saved mapping (highest signal — human approved this before)
+        # Keyed on supplier_code OR barcode, whichever extraction gave us.
+        for key in (line.supplier_code, line.barcode):
+            if not key:
+                continue
             mapping = await find_mapping(
-                self.session,
-                supplier_id=supplier_id,
-                supplier_code=line.supplier_code,
+                self.session, supplier_id=supplier_id, supplier_code=key,
             )
             if mapping:
                 return MatchedLine(
@@ -142,10 +143,31 @@ class MatchingService:
                     confidence=1.0,
                 )
 
-        # Tier 2: exact SKU match
-        if line.supplier_code:
+        # Tier 2: barcode/UPC match (primary signal for catalogs where the
+        # Lightspeed SKU field IS the UPC, which is common in pet retail).
+        # We try both the extracted barcode AND supplier_code, because
+        # extraction sometimes swaps these columns.
+        for code in (line.barcode, line.supplier_code):
+            if not code:
+                continue
+            # Try barcode lookup
             try:
-                product = await self.ls.find_product_by_sku(line.supplier_code)
+                product = await self.ls.find_product_by_barcode(code)
+            except LightspeedError as exc:
+                logger.warning("Barcode lookup failed: %s", exc)
+                product = None
+            if product:
+                return MatchedLine(
+                    raw=line,
+                    product_id=product["id"],
+                    product_sku=product.get("sku"),
+                    product_name=product.get("name"),
+                    matched_by="barcode",
+                    confidence=1.0,
+                )
+            # Try SKU lookup (Lightspeed sku field often holds the UPC)
+            try:
+                product = await self.ls.find_product_by_sku(code)
             except LightspeedError as exc:
                 logger.warning("SKU lookup failed: %s", exc)
                 product = None
@@ -159,34 +181,7 @@ class MatchingService:
                     confidence=1.0,
                 )
 
-        # Tier 3: barcode match. We scan the supplier's product list
-        # locally rather than hitting the API — much faster.
-        if line.barcode:
-            for p in supplier_products:
-                # Lightspeed's barcode field is sometimes a list, sometimes
-                # a string; handle both shapes defensively.
-                pb = p.get("barcode") or ""
-                if isinstance(pb, list):
-                    if line.barcode in pb:
-                        return MatchedLine(
-                            raw=line,
-                            product_id=p["id"],
-                            product_sku=p.get("sku"),
-                            product_name=p.get("name"),
-                            matched_by="barcode",
-                            confidence=1.0,
-                        )
-                elif pb == line.barcode:
-                    return MatchedLine(
-                        raw=line,
-                        product_id=p["id"],
-                        product_sku=p.get("sku"),
-                        product_name=p.get("name"),
-                        matched_by="barcode",
-                        confidence=1.0,
-                    )
-
-        # Tier 4: fuzzy name match against supplier's catalog
+        # Tier 3: fuzzy name match against supplier's catalog (last resort)
         if line.description and supplier_products:
             scored = sorted(
                 (
@@ -206,26 +201,21 @@ class MatchingService:
                     matched_by="fuzzy_name",
                     confidence=top_score,
                 )
-            # Below threshold — surface top candidates for human review.
             candidates = [
                 {
-                    "product_id": p["id"],
-                    "sku": p.get("sku"),
-                    "name": p.get("name"),
-                    "confidence": round(score, 3),
+                    "product_id": p["id"], "sku": p.get("sku"),
+                    "name": p.get("name"), "confidence": round(score, 3),
                 }
                 for score, p in scored[:3]
             ]
             return UnmatchedLine(
-                raw=line,
-                candidates=candidates,
-                reason="No exact match; top fuzzy match below threshold",
+                raw=line, candidates=candidates,
+                reason="No code/barcode match; top fuzzy match below threshold",
             )
 
         return UnmatchedLine(
-            raw=line,
-            candidates=[],
-            reason="No supplier_code, barcode, or description to match on",
+            raw=line, candidates=[],
+            reason="No matching code, barcode, or description found",
         )
 
     async def _load_supplier_products(self, supplier_id: str) -> list[dict]:

@@ -356,6 +356,55 @@ function render() {
        + '/csv" class="cand-btn">Download CSV backup</a></div>';
   html += '</div>';
 
+  // Full extraction table — every line, before any matching decisions.
+  // This is what came out of Claude; verify it against the PDF.
+  const allLines = [
+    ...d.matched.map(l => ({...l, _bucket: 'match'})),
+    ...d.uncertain.map(l => ({...l, _bucket: 'uncertain'})),
+  ];
+  html += '<div class="card"><h2>Extracted lines</h2>'
+       + '<p class="subtitle" style="margin-top:-4px">'
+       + 'Verify these against the PDF before importing. '
+       + (allLines.length + ' line' + (allLines.length !== 1 ? 's' : '')) + ' total.'
+       + '</p>'
+       + '<table><thead><tr>'
+       + '<th>#</th><th>Code</th><th>Description</th><th>Barcode</th>'
+       + '<th class="num">Qty</th><th class="num">Unit</th><th class="num">Line</th>'
+       + '<th>Status</th></tr></thead><tbody>';
+  allLines.forEach((l, i) => {
+    const lineTotal = l.quantity * l.unit_cost;
+    html += '<tr>'
+         + '<td style="color:var(--muted)">' + (i + 1) + '</td>'
+         + '<td>' + escape(l.supplier_code || '—') + '</td>'
+         + '<td>' + escape(l.description || '—') + '</td>'
+         + '<td>' + escape(l.barcode || '—') + '</td>'
+         + '<td class="num">' + l.quantity + '</td>'
+         + '<td class="num">' + l.unit_cost.toFixed(2) + '</td>'
+         + '<td class="num">' + lineTotal.toFixed(2) + '</td>'
+         + '<td><span class="badge ' + l._bucket + '">' + l._bucket + '</span></td>'
+         + '</tr>';
+  });
+  // Computed subtotal vs claimed subtotal sanity-check row
+  const computed = allLines.reduce((s, l) => s + l.quantity * l.unit_cost, 0);
+  html += '<tr style="font-weight:600">'
+       + '<td colspan="6" class="num">Computed line-item sum</td>'
+       + '<td class="num">' + computed.toFixed(2) + '</td>'
+       + '<td>' + (inv.subtotal != null
+            ? (Math.abs(computed - inv.subtotal) < 0.5
+                ? '<span style="color:var(--good)">✓ matches</span>'
+                : '<span style="color:var(--bad)">≠ ' + inv.subtotal.toFixed(2) + '</span>')
+            : '') + '</td>'
+       + '</tr>';
+  html += '</tbody></table>';
+
+  // Collapsible raw JSON for debugging the extraction
+  html += '<details style="margin-top:12px"><summary style="cursor:pointer;'
+       + 'color:var(--muted);font-size:13px">Show raw extraction JSON</summary>'
+       + '<pre style="background:#f8f8f7;padding:12px;border-radius:6px;'
+       + 'font-size:12px;overflow-x:auto;margin-top:8px">'
+       + escape(JSON.stringify(d, null, 2)) + '</pre></details>';
+  html += '</div>';
+
   // Matched bucket
   if (d.matched.length) {
     html += '<div class="bucket-title"><span class="badge match">Match</span>'

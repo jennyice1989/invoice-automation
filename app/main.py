@@ -583,9 +583,30 @@ async def finalize_invoice(
         errors.append(f"Unknown decision type: {dec.decision}")
 
     if not items_for_lightspeed:
+        # Distinguish "you skipped everything" from "everything errored".
+        skipped_count = len(skipped)
+        decisions_count = len(body.decisions)
+        if skipped_count > 0 and skipped_count == decisions_count and not errors:
+            msg = (
+                f"All {skipped_count} uncertain line(s) were skipped, and "
+                f"there were no matched lines to import. Nothing to push to "
+                f"Lightspeed."
+            )
+        elif not matched and not body.decisions:
+            msg = (
+                "No matched lines and no decisions submitted. Nothing to "
+                "push to Lightspeed."
+            )
+        elif errors:
+            msg = (
+                f"All items failed to process: {'; '.join(errors[:3])}"
+                + (f" (and {len(errors) - 3} more)" if len(errors) > 3 else "")
+            )
+        else:
+            msg = "No items to import after decisions applied"
         invoice.status = "FAILED"
-        invoice.error = "No items to import after decisions applied"
-        raise HTTPException(400, "No items to import")
+        invoice.error = msg
+        raise HTTPException(400, msg)
 
     # 3. Push consignment
     try:
@@ -787,6 +808,81 @@ async def upload_msrp(
 # --------------------------------------------------------------------- #
 # Direct API endpoints retained                                         #
 # --------------------------------------------------------------------- #
+
+@app.get("/debug/sku", dependencies=[Depends(require_auth)])
+async def debug_sku(sku: str):
+    """Direct test of SKU lookup. Returns what /search and ?sku= both
+    return so we can see exactly what Lightspeed knows about this SKU."""
+    client = _client()
+    out = {"input_sku": sku, "lowercased": sku.lower()}
+    try:
+        product = await client.find_product_by_sku(sku)
+        out["find_product_by_sku"] = (
+            None if not product else {
+                "id": product["id"], "sku": product.get("sku"),
+                "name": product.get("name"),
+            }
+        )
+    except Exception as exc:
+        out["find_product_by_sku"] = f"error: {exc}"
+
+    try:
+        raw = await client._request(
+            "GET", "/search",
+            params={"type": "products", "sku": sku.lower(), "page_size": 5},
+        )
+        out["raw_search_results"] = [{
+            "id": p["id"], "sku": p.get("sku"), "name": p.get("name"),
+        } for p in raw.get("data", [])]
+    except Exception as exc:
+        out["raw_search_results"] = f"error: {exc}"
+
+    try:
+        raw2 = await client._request(
+            "GET", "/products",
+            params={"sku": sku, "page_size": 5},
+        )
+        out["legacy_sku_param_results"] = [{
+            "id": p["id"], "sku": p.get("sku"), "name": p.get("name"),
+        } for p in raw2.get("data", [])]
+    except Exception as exc:
+        out["legacy_sku_param_results"] = f"error: {exc}"
+
+    return out
+
+
+@app.get("/debug/barcode", dependencies=[Depends(require_auth)])
+async def debug_barcode(barcode: str):
+    """Direct test of barcode lookup — useful when invoice UPCs should
+    match Lightspeed's sku/barcode field."""
+    client = _client()
+    out = {"input_barcode": barcode}
+    try:
+        product = await client.find_product_by_barcode(barcode)
+        out["find_product_by_barcode"] = (
+            None if not product else {
+                "id": product["id"], "sku": product.get("sku"),
+                "name": product.get("name"),
+                "barcode": product.get("barcode"),
+            }
+        )
+    except Exception as exc:
+        out["find_product_by_barcode"] = f"error: {exc}"
+
+    # Also try SKU lookup with the barcode value (since your sku field IS the UPC)
+    try:
+        product = await client.find_product_by_sku(barcode)
+        out["find_product_by_sku_using_barcode"] = (
+            None if not product else {
+                "id": product["id"], "sku": product.get("sku"),
+                "name": product.get("name"),
+            }
+        )
+    except Exception as exc:
+        out["find_product_by_sku_using_barcode"] = f"error: {exc}"
+
+    return out
+
 
 @app.get("/consignments/{consignment_id}", dependencies=[Depends(require_auth)])
 async def get_consignment(consignment_id: str):
