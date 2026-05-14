@@ -22,6 +22,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -102,6 +103,10 @@ class Invoice(Base):
 
     # Cached extraction + match results so the review page survives a refresh.
     extraction_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Original PDF bytes — kept so the invoice can be re-processed later
+    # after pipeline improvements. Invoices are small; this is fine at
+    # single-store volume. Nullable so old rows without it still load.
+    pdf_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True
@@ -241,6 +246,14 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Lightweight migration: add columns that may not exist on
+        # databases created by earlier versions. create_all() never
+        # alters existing tables, so we do it explicitly. Postgres
+        # supports IF NOT EXISTS on ADD COLUMN.
+        from sqlalchemy import text
+        await conn.execute(text(
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS pdf_bytes BYTEA"
+        ))
 
     # Seed default pricing rules if the table is empty.
     async with session_scope() as session:

@@ -211,39 +211,66 @@ tr.row:hover { background: var(--accent-soft); cursor: pointer; }
     <table id="tbl">
       <thead><tr>
         <th>When</th><th>Supplier</th><th>Invoice #</th><th>Date</th>
-        <th class="num">Total</th><th>Status</th>
+        <th class="num">Total</th><th>Status</th><th></th>
       </tr></thead>
-      <tbody><tr><td colspan="6" style="color:var(--muted)">Loading...</td></tr></tbody>
+      <tbody><tr><td colspan="7" style="color:var(--muted)">Loading...</td></tr></tbody>
     </table>
   </div>
 </div>
 <script>
-(async () => {
+(async () => { await load(); })();
+
+async function load() {
   const resp = await fetch('/invoices');
   const data = await resp.json();
   const tb = document.querySelector('#tbl tbody');
   if (!data.data.length) {
-    tb.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No invoices yet.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No invoices yet.</td></tr>';
     return;
   }
   tb.innerHTML = '';
   for (const r of data.data) {
     const tr = document.createElement('tr');
     tr.className = 'row';
-    tr.onclick = () => window.location = '/review/' + r.id;
     tr.innerHTML =
-      '<td>' + new Date(r.created_at).toLocaleString() + '</td>' +
-      '<td>' + escape(r.supplier_name) + '</td>' +
-      '<td>' + escape(r.supplier_invoice_number) + '</td>' +
-      '<td>' + escape(r.invoice_date) + '</td>' +
-      '<td class="num">' + (r.total == null ? '—' : r.total.toFixed(2)) + '</td>' +
-      '<td><span class="badge ' + r.status.toLowerCase() + '">' + r.status + '</span></td>';
+      '<td onclick="go(' + r.id + ')">' + new Date(r.created_at).toLocaleString() + '</td>' +
+      '<td onclick="go(' + r.id + ')">' + escape(r.supplier_name) + '</td>' +
+      '<td onclick="go(' + r.id + ')">' + escape(r.supplier_invoice_number) + '</td>' +
+      '<td onclick="go(' + r.id + ')">' + escape(r.invoice_date) + '</td>' +
+      '<td class="num" onclick="go(' + r.id + ')">' +
+        (r.total == null ? '—' : r.total.toFixed(2)) + '</td>' +
+      '<td onclick="go(' + r.id + ')"><span class="badge ' + r.status.toLowerCase() +
+        '">' + r.status + '</span></td>' +
+      '<td><button class="secondary" onclick="del(' + r.id + ',\\'' +
+        escAttr(r.supplier_invoice_number || ('#' + r.id)) + '\\',\\'' +
+        r.status + '\\')">Delete</button></td>';
     tb.appendChild(tr);
   }
-})();
+}
+function go(id) { window.location = '/review/' + id; }
+
+async function del(id, label, status) {
+  let msg = 'Delete invoice ' + label + '?';
+  if (status === 'IMPORTED') {
+    msg += '\\n\\nNOTE: This was already pushed to Lightspeed. The '
+         + 'consignment in Lightspeed will NOT be deleted — only this '
+         + 'local record. You would need to remove the consignment in '
+         + 'Lightspeed manually.';
+  }
+  if (!confirm(msg)) return;
+  const resp = await fetch('/invoices/' + id, { method: 'DELETE' });
+  const data = await resp.json();
+  if (resp.ok) {
+    if (data.warning) alert(data.warning);
+    load();
+  } else {
+    alert('Delete failed: ' + (data.detail || resp.statusText));
+  }
+}
 function escape(s) { return s == null ? '—' : String(s).replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
+function escAttr(s) { return String(s == null ? '' : s).replace(/'/g, "\\\\'"); }
 </script>
 </body></html>"""
 
@@ -272,6 +299,8 @@ REVIEW_HTML = """<!DOCTYPE html>
             font-size: 12px; margin: 2px; }
 .cand-btn:hover { border-color: var(--accent); }
 .cand-btn.picked { background: var(--accent); color: white; border-color: var(--accent); }
+.cand-btn.unmatch-skip { background: var(--bad-bg); border-color: #fecaca; color: var(--bad); }
+.cand-btn.unmatch-skip:hover { border-color: var(--bad); }
 .bucket-title { display: flex; align-items: center; gap: 12px;
                 margin: 24px 0 12px; }
 .bucket-title h2 { margin: 0; }
@@ -352,8 +381,16 @@ function render() {
   html += metaRow('Subtotal', fmtMoney(inv.subtotal));
   html += metaRow('Total', fmtMoney(inv.total));
   html += '</div>';
-  html += '<div style="margin-top:12px"><a href="/invoices/' + INVOICE_ID
-       + '/csv" class="cand-btn">Download CSV backup</a></div>';
+  html += '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">';
+  html += '<a href="/invoices/' + INVOICE_ID + '/csv" class="cand-btn">'
+       + 'Download CSV backup</a>';
+  if (!isImported) {
+    html += '<button class="cand-btn" onclick="reprocess()">'
+         + 'Re-process (re-run extraction + matching)</button>';
+  }
+  html += '<button class="cand-btn unmatch-skip" onclick="deleteInvoice()">'
+       + 'Delete this invoice</button>';
+  html += '</div>';
   html += '</div>';
 
   // Full extraction table — every line, before any matching decisions.
@@ -616,6 +653,60 @@ async function finalize() {
     document.getElementById('finalResult').innerHTML =
       '<div class="error">Network error: ' + escape(err.message) + '</div>';
     btn.disabled = false; btn.textContent = 'Retry';
+  }
+}
+
+async function reprocess() {
+  if (!confirm('Re-process this invoice? The current extraction and '
+    + 'matching will be discarded and the original PDF will be re-run '
+    + 'through the pipeline. Any decisions you\\'ve made here will be lost.')) {
+    return;
+  }
+  document.getElementById('content').innerHTML =
+    '<p style="color:var(--muted)"><span class="spinner"></span>'
+    + 'Re-processing... (15-45 seconds)</p>';
+  try {
+    const resp = await fetch('/invoices/' + INVOICE_ID + '/reprocess',
+      { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      document.getElementById('content').innerHTML =
+        '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
+      return;
+    }
+    if (data.duplicate) {
+      // Shouldn't happen (allow_duplicate=true), but handle gracefully.
+      window.location.href = '/review/' + data.existing_invoice_id;
+      return;
+    }
+    // New invoice id — go to its review page.
+    window.location.href = data.redirect;
+  } catch (err) {
+    document.getElementById('content').innerHTML =
+      '<div class="error">Network error: ' + escape(err.message) + '</div>';
+  }
+}
+
+async function deleteInvoice() {
+  const isImported = DATA.status === 'IMPORTED';
+  let msg = 'Delete this invoice?';
+  if (isImported) {
+    msg += '\\n\\nNOTE: This was already pushed to Lightspeed. The '
+         + 'consignment in Lightspeed will NOT be deleted — only this '
+         + 'local record.';
+  }
+  if (!confirm(msg)) return;
+  try {
+    const resp = await fetch('/invoices/' + INVOICE_ID, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      alert('Delete failed: ' + (data.detail || resp.statusText));
+      return;
+    }
+    if (data.warning) alert(data.warning);
+    window.location.href = '/history';
+  } catch (err) {
+    alert('Network error: ' + err.message);
   }
 }
 

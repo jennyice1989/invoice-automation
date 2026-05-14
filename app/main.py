@@ -208,27 +208,24 @@ async def list_suppliers():
 # Upload / process                                                      #
 # --------------------------------------------------------------------- #
 
-@app.post("/invoices/process", dependencies=[Depends(require_auth)])
-async def process_invoice(
-    file: UploadFile = File(...),
-    session: AsyncSession = Depends(_session),
-):
-    """Upload PDF, extract, dedupe, match, price, store. Returns invoice_id."""
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are supported")
+async def _run_pipeline(
+    pdf_bytes: bytes,
+    filename: str | None,
+    session: AsyncSession,
+    *,
+    allow_duplicate: bool = False,
+) -> dict:
+    """Core pipeline: extract -> resolve supplier -> dedupe -> match ->
+    price -> persist. Used by both fresh upload and re-process.
 
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise HTTPException(400, "Empty file")
-    if len(pdf_bytes) > 30 * 1024 * 1024:
-        raise HTTPException(400, "PDF too large (max 30 MB)")
-
+    If allow_duplicate is True, the dedupe check is skipped (re-process
+    has already deleted the old row, so the "duplicate" would be itself).
+    """
     try:
         extracted = await extract_invoice_from_pdf(pdf_bytes)
     except ExtractionError as exc:
         raise HTTPException(502, f"Extraction failed: {exc}")
 
-    # Resolve supplier
     client = _client()
     supplier_id: str | None = None
     supplier_name = extracted.supplier_name
@@ -250,7 +247,7 @@ async def process_invoice(
             extracted.warnings.append(f"Supplier lookup failed: {exc}")
 
     # Dedupe check
-    if supplier_id and extracted.invoice_number:
+    if not allow_duplicate and supplier_id and extracted.invoice_number:
         existing = await find_existing_invoice(
             session, supplier_id=supplier_id,
             supplier_invoice_number=extracted.invoice_number,
@@ -267,9 +264,8 @@ async def process_invoice(
                 ),
             }
 
-    # Create invoice row
     invoice = Invoice(
-        filename=file.filename,
+        filename=filename,
         supplier_id=supplier_id,
         supplier_name=supplier_name,
         supplier_invoice_number=extracted.invoice_number,
@@ -279,11 +275,11 @@ async def process_invoice(
         total=extracted.total,
         page_count=extracted.page_count,
         status="EXTRACTED",
+        pdf_bytes=pdf_bytes,
     )
     session.add(invoice)
     await session.flush()
 
-    # Match line items
     matched_results: list = []
     unmatched_results: list = []
     if supplier_id and extracted.lines:
@@ -307,16 +303,14 @@ async def process_invoice(
             f"every line will need review."
         )
 
-    # Price every line (matched and unmatched alike)
     async def _price(supplier_code, barcode, description, cost):
         try:
             return await price_line(
-                session,
-                supplier_id=supplier_id,
+                session, supplier_id=supplier_id,
                 supplier_code=supplier_code, barcode=barcode,
                 description=description, cost=cost,
             )
-        except Exception as exc:  # never let pricing block a workflow
+        except Exception as exc:
             logger.warning("Pricing failed: %s", exc)
             return PricingResult(price=None, source="none", notes=str(exc))
 
@@ -333,7 +327,7 @@ async def process_invoice(
             "matched_by": m.matched_by, "confidence": m.confidence,
             "product_sku": m.product_sku, "product_name": m.product_name,
         }
-        line = InvoiceLine(
+        invoice_lines_for_db.append(InvoiceLine(
             invoice_id=invoice.id,
             supplier_code=m.raw.supplier_code, description=m.raw.description,
             barcode=m.raw.barcode, quantity=m.raw.quantity,
@@ -341,8 +335,7 @@ async def process_invoice(
             lightspeed_product_id=m.product_id,
             suggested_retail_price=pr.price,
             pricing_source=pr.source, match_meta=meta,
-        )
-        invoice_lines_for_db.append(line)
+        ))
         matched_payload.append({
             "supplier_code": m.raw.supplier_code, "description": m.raw.description,
             "barcode": m.raw.barcode, "quantity": m.raw.quantity,
@@ -358,15 +351,14 @@ async def process_invoice(
             u.raw.supplier_code, u.raw.barcode, u.raw.description, u.raw.unit_cost,
         )
         meta = {"candidates": u.candidates, "reason": u.reason}
-        line = InvoiceLine(
+        invoice_lines_for_db.append(InvoiceLine(
             invoice_id=invoice.id,
             supplier_code=u.raw.supplier_code, description=u.raw.description,
             barcode=u.raw.barcode, quantity=u.raw.quantity,
             unit_cost=u.raw.unit_cost, bucket="uncertain",
             suggested_retail_price=pr.price,
             pricing_source=pr.source, match_meta=meta,
-        )
-        invoice_lines_for_db.append(line)
+        ))
         uncertain_payload.append({
             "supplier_code": u.raw.supplier_code, "description": u.raw.description,
             "barcode": u.raw.barcode, "quantity": u.raw.quantity,
@@ -377,7 +369,6 @@ async def process_invoice(
 
     session.add_all(invoice_lines_for_db)
 
-    # Cache full payload for the review page
     invoice.extraction_json = {
         "invoice": {
             "supplier_name": supplier_name, "supplier_id": supplier_id,
@@ -388,7 +379,7 @@ async def process_invoice(
             "page_count": extracted.page_count,
         },
         "matched": matched_payload,
-        "new": new_payload,        # populated when user marks "create new"
+        "new": new_payload,
         "uncertain": uncertain_payload,
         "warnings": extracted.warnings,
     }
@@ -403,6 +394,96 @@ async def process_invoice(
         },
         "redirect": f"/review/{invoice.id}",
     }
+
+
+@app.post("/invoices/process", dependencies=[Depends(require_auth)])
+async def process_invoice(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(_session),
+):
+    """Upload PDF, extract, dedupe, match, price, store. Returns invoice_id."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(400, "Empty file")
+    if len(pdf_bytes) > 30 * 1024 * 1024:
+        raise HTTPException(400, "PDF too large (max 30 MB)")
+
+    return await _run_pipeline(pdf_bytes, file.filename, session)
+
+
+@app.delete("/invoices/{invoice_id}", dependencies=[Depends(require_auth)])
+async def delete_invoice(
+    invoice_id: int, session: AsyncSession = Depends(_session),
+):
+    """Delete an invoice and its lines. Does NOT touch anything already
+    pushed to Lightspeed — if a consignment was created, it stays in
+    Lightspeed; only the local record is removed."""
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+
+    had_consignment = invoice.consignment_id
+    # invoice_lines cascade-delete via the relationship's cascade setting
+    await session.delete(invoice)
+
+    return {
+        "ok": True,
+        "deleted_invoice_id": invoice_id,
+        "warning": (
+            f"A consignment ({had_consignment}) was already created in "
+            f"Lightspeed for this invoice; it was NOT deleted. Remove it "
+            f"in Lightspeed if needed."
+            if had_consignment else None
+        ),
+    }
+
+
+@app.post("/invoices/{invoice_id}/reprocess", dependencies=[Depends(require_auth)])
+async def reprocess_invoice(
+    invoice_id: int, session: AsyncSession = Depends(_session),
+):
+    """Re-run the original PDF through the current pipeline.
+
+    Deletes the old invoice record and creates a fresh one from the stored
+    PDF bytes. Useful after pipeline improvements. Refuses if the invoice
+    was already imported (don't want to silently orphan a consignment).
+    """
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if invoice.status == "IMPORTED":
+        raise HTTPException(
+            409,
+            "This invoice was already imported to Lightspeed. Delete the "
+            "consignment in Lightspeed first if you really want to redo it, "
+            "then delete this record and re-upload the PDF.",
+        )
+    if not invoice.pdf_bytes:
+        raise HTTPException(
+            400,
+            "The original PDF for this invoice wasn't stored (it was "
+            "processed before PDF storage was added). Delete this record "
+            "and re-upload the PDF instead.",
+        )
+
+    pdf_bytes = invoice.pdf_bytes
+    filename = invoice.filename
+
+    # Delete the old record (and its lines) so the dedupe check doesn't
+    # flag the re-process as a duplicate of itself.
+    await session.delete(invoice)
+    await session.flush()
+
+    return await _run_pipeline(
+        pdf_bytes, filename, session, allow_duplicate=True,
+    )
 
 
 # --------------------------------------------------------------------- #
