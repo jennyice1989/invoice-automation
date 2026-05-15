@@ -1,7 +1,0 @@
-$kind: http-request
-url: "{{baseUrl}}/products?supplier_code={{supplier_code}}&page_size=5"
-method: GET
-queryParams:
-  supplier_code: "{{supplier_code}}"
-  page_size: "5"
-order: 3000

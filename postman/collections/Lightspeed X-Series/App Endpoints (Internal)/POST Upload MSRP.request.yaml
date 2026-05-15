@@ -1,9 +1,0 @@
-$kind: http-request
-url: "{{appUrl}}/pricing/msrp"
-method: POST
-body:
-  type: formdata
-  content: []
-auth:
-  type: noauth
-order: 10000
