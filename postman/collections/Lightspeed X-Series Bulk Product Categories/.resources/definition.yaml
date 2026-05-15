@@ -7,4 +7,4 @@ variables:
 auth:
   type: bearer
   credentials:
-    token: #LIGHTSPEED_ACCESS_TOKEN#
+    
