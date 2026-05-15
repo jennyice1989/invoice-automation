@@ -1,0 +1,108 @@
+$kind: http-request
+url: 'https://{{domain_prefix}}.retail.lightspeed.app/api/2026-04/product_categories/bulk'
+method: POST
+headers:
+  Authorization: 'Bearer {{personal_token}}'
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "categories": [
+        { "name": "Livestock" },
+        { "name": "Aquarium Equipment" },
+        { "name": "Aquarium Supplies" },
+        { "name": "Reptile Supplies" },
+        { "name": "Small Animal Supplies" }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      // ── Pass 1 post-response script ──────────────────────────────────────
+      // Saves the API-assigned IDs for the 5 root categories to environment
+      // variables so that Pass 2 can reference them as parent_id values.
+
+      pm.test("Status is 2xx", function () {
+        pm.expect(pm.response.code).to.be.within(200, 299);
+      });
+
+      pm.test("Response is JSON", function () {
+        pm.expect(pm.response.headers.get("Content-Type")).to.include("json");
+      });
+
+      if (!pm.response.headers.get("Content-Type")?.includes("json")) {
+        console.error("Non-JSON response – first 200 chars:", pm.response.text().substring(0, 200));
+        return;
+      }
+
+      const res = pm.response.json();
+      // API may return { categories: [...] } or a flat array
+      const created = Array.isArray(res) ? res : (res.categories || []);
+
+      // Map name → API-assigned id
+      const nameToId = {};
+      for (const cat of created) {
+        if (cat.name && cat.id) nameToId[cat.name] = cat.id;
+      }
+
+      // The 5 root categories we sent in Pass 1
+      const roots = [
+        { envKey: "cat_id_livestock",          name: "Livestock" },
+        { envKey: "cat_id_aquarium_equipment", name: "Aquarium Equipment" },
+        { envKey: "cat_id_aquarium_supplies",  name: "Aquarium Supplies" },
+        { envKey: "cat_id_reptile_supplies",   name: "Reptile Supplies" },
+        { envKey: "cat_id_small_animal_supplies", name: "Small Animal Supplies" }
+      ];
+
+      let saved = 0;
+      for (const { envKey, name } of roots) {
+        if (nameToId[name]) {
+          pm.environment.set(envKey, nameToId[name]);
+          saved++;
+          console.log(`✅ Saved ${envKey} = ${nameToId[name]}`);
+        } else {
+          console.warn(`⚠️  No id found for "${name}" in response`);
+        }
+      }
+
+      pm.test(`All 5 root category IDs saved to environment (got ${saved}/5)`, function () {
+        pm.expect(saved).to.equal(5);
+      });
+
+      // ── Visualiser ───────────────────────────────────────────────────────
+      const rows = roots.map(({ envKey, name }) => {
+        const id = nameToId[name] || '<not returned>';
+        const ok = !!nameToId[name];
+        return `<tr>
+          <td style="padding:6px 10px;font-weight:600;">${name}</td>
+          <td style="padding:6px 10px;font-family:monospace;font-size:12px;color:#555;">${id}</td>
+          <td style="padding:6px 10px;text-align:center;">${ok ? '✅' : '❌'}</td>
+          <td style="padding:6px 10px;font-family:monospace;font-size:11px;color:#888;">{{${envKey}}}</td>
+        </tr>`;
+      }).join('');
+
+      const template = `
+      <html><body style="font-family:sans-serif;padding:16px;color:#222;background:#fff;">
+        <h2 style="margin-bottom:4px;">📦 Pass 1 – Root Categories Created</h2>
+        <p style="color:#555;margin-top:0;">IDs have been saved to the active environment for use in Pass 2.</p>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;">
+          <thead>
+            <tr style="background:#f0f4ff;">
+              <th style="padding:6px 10px;text-align:left;">Category</th>
+              <th style="padding:6px 10px;text-align:left;">API ID</th>
+              <th style="padding:6px 10px;">Saved</th>
+              <th style="padding:6px 10px;text-align:left;">Env Variable</th>
+            </tr>
+          </thead>
+          <tbody>{{rows}}</tbody>
+        </table>
+        <p style="margin-top:14px;font-size:12px;color:#888;">
+          ▶ Run <strong>Bulk Create Product Categories – Pass 2</strong> next to create all child categories.
+        </p>
+      </body></html>`;
+
+      pm.visualizer.set(template, { rows });
+order: 2191117833469951

@@ -1,4 +1,5 @@
 $kind: collection
+name: Lightspeed X-Series
 description: Postman collection for the Lightspeed X-Series API, tailored for invoice automation workflows.
 variables:
   baseUrl: https://{{domain_prefix}}.retail.lightspeed.app/api/2.0
@@ -25,9 +26,8 @@ variables:
   invoice_id: ""
   rule_id: ""
   search_query: ""
+  personal_token: ""
 auth:
-  - id: ac52c305-ba47-455a-9ce2-1f2975e025fc
-    type: bearer
-    name: bearer auth
-    credentials:
-      token: "{{personal_token}}"
+  type: bearer
+  credentials:
+    token: "{{personal_token}}"

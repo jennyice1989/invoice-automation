@@ -1023,7 +1023,14 @@ ENRICH_REVIEW_HTML = """<!DOCTYPE html>
               font-weight: 600; text-transform: uppercase; }
 .kind-badge.dry_good { background: #dbeafe; color: #1e40af; }
 .kind-badge.live_fish { background: #d1fae5; color: #065f46; }
+.kind-badge.live_invert { background: #ccfbf1; color: #0f766e; }
+.kind-badge.live_plant { background: #dcfce7; color: #14532d; }
+.kind-badge.live_coral { background: #fce7f3; color: #9d174d; }
 .kind-badge.unknown { background: #fef3c7; color: #92400e; }
+.desc-preview { padding: 12px 14px; background: #fafaf9; border: 1px solid var(--border);
+                border-radius: 4px; font-size: 14px; line-height: 1.5; }
+.desc-preview h3 { margin: 0 0 8px; font-size: 16px; }
+.desc-preview p { margin: 6px 0; }
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
 .fields .full { grid-column: 1 / -1; }
 .field label { display: block; font-size: 11px; color: var(--muted);
@@ -1066,12 +1073,16 @@ ENRICH_REVIEW_HTML = """<!DOCTYPE html>
 const BATCH_ID = "{{BATCH_ID}}";
 let DRAFTS = [];
 let SUPPLIERS = [];
+let CATEGORIES = [];
+let BRANDS = [];
 
 (async () => {
   try {
-    const [batchResp, supResp] = await Promise.all([
+    const [batchResp, supResp, catResp, brandResp] = await Promise.all([
       fetch('/enrich/batch/' + BATCH_ID),
       fetch('/suppliers'),
+      fetch('/categories'),
+      fetch('/brands'),
     ]);
     const batchData = await batchResp.json();
     if (!batchResp.ok) {
@@ -1081,6 +1092,8 @@ let SUPPLIERS = [];
     }
     DRAFTS = batchData.drafts;
     if (supResp.ok) SUPPLIERS = (await supResp.json()).data || [];
+    if (catResp.ok) CATEGORIES = (await catResp.json()).data || [];
+    if (brandResp.ok) BRANDS = (await brandResp.json()).data || [];
     render();
   } catch (err) {
     document.getElementById('content').innerHTML =
@@ -1146,14 +1159,18 @@ function renderDraft(d) {
             : d.status === 'SKIPPED' ? 'skipped'
             : d.status === 'PENDING_ENRICH' ? 'skipped'
             : '';
-  const uncertain = (d.fish_profile && d.fish_profile.uncertain_fields) || [];
+
+  const kindLabel =
+    d.kind === 'live_fish' ? 'Live fish' :
+    d.kind === 'live_invert' ? 'Live invert' :
+    d.kind === 'live_plant' ? 'Live plant' :
+    d.kind === 'live_coral' ? 'Live coral' :
+    d.kind === 'dry_good' ? 'Dry good' : 'Unknown';
 
   let html = '<div class="draft-card ' + cls + '" id="draft-' + d.id + '">';
   html += '<div class="draft-head">'
-    + '<span class="kind-badge ' + d.kind + '">' +
-        (d.kind === 'live_fish' ? 'Live fish' : d.kind === 'dry_good' ? 'Dry good' : 'Unknown') +
-      '</span>'
-    + '<h3>' + escape(d.input_name) + '</h3>'
+    + '<span class="kind-badge ' + d.kind + '">' + kindLabel + '</span>'
+    + '<h3>' + escape(d.final_name || d.input_name) + '</h3>'
     + (d.source_invoice_id
         ? '<small style="color:var(--muted)">from invoice '
           + '<a href="/review/' + d.source_invoice_id + '">#' + d.source_invoice_id
@@ -1180,51 +1197,58 @@ function renderDraft(d) {
   const dis = locked ? ' disabled' : '';
   html += '<div class="fields">';
 
-  // Common fields
+  // Identity row
   html += field('Product name', 'final_name', d.final_name || d.input_name, d, dis, 'full');
+
+  // Classification + supplier
   html += '<div class="field"><label>Type</label><select onchange="upd(' + d.id +
     ',\\'kind\\',this.value)"' + dis + '>'
     + '<option value="dry_good"' + (d.kind === 'dry_good' ? ' selected':'') + '>Dry good</option>'
     + '<option value="live_fish"' + (d.kind === 'live_fish' ? ' selected':'') + '>Live fish</option>'
+    + '<option value="live_invert"' + (d.kind === 'live_invert' ? ' selected':'') + '>Live invert</option>'
+    + '<option value="live_plant"' + (d.kind === 'live_plant' ? ' selected':'') + '>Live plant</option>'
+    + '<option value="live_coral"' + (d.kind === 'live_coral' ? ' selected':'') + '>Live coral</option>'
     + '<option value="unknown"' + (d.kind === 'unknown' ? ' selected':'') + '>Unknown</option>'
     + '</select></div>';
+
   html += '<div class="field"><label>Supplier</label><select onchange="upd(' + d.id +
     ',\\'supplier_id\\',this.value)"' + dis + '>' + supplierOptions(d.supplier_id) + '</select></div>';
+
+  // Category dropdown — picks from real Lightspeed list
+  html += '<div class="field"><label>Product category</label><select onchange="updCategory(' + d.id +
+    ',this.value)"' + dis + '>' + categoryOptions(d.product_category) + '</select></div>';
+
+  // Brand dropdown
+  html += '<div class="field"><label>Brand</label><select onchange="updBrand(' + d.id +
+    ',this.value)"' + dis + '>' + brandOptions(d.brand_name) + '</select></div>';
+
+  // Codes
   html += field('SKU', 'sku', d.sku, d, dis);
   html += field('Barcode / UPC', 'barcode', d.barcode, d, dis);
   html += field('Supplier code', 'supplier_code', d.supplier_code, d, dis);
+
+  // Pricing
   html += numField('Supply price', 'supply_price', d.supply_price, d, dis);
   html += numField('Retail price', 'retail_price', d.retail_price, d, dis);
+
+  // Photo flag
   html += '<div class="field"><label>Photo</label><label style="font-weight:normal;'
     + 'text-transform:none;font-size:13px"><input type="checkbox"' +
     (d.has_photo ? ' checked':'') + dis + ' onchange="upd(' + d.id +
     ',\\'has_photo\\',this.checked)" /> I have a photo to add in Lightspeed</label></div>';
 
-  if (d.kind === 'dry_good' || d.kind === 'unknown') {
-    html += '<div class="field full"><label>Description'
-      + (d.detected_brand ? ' (brand: ' + escape(d.detected_brand) + ')' : '')
-      + '</label><textarea' + dis + ' onchange="upd(' + d.id +
-      ',\\'description\\',this.value)">' + escape(d.description || '') + '</textarea></div>';
-  }
+  // Tags
+  html += field('Tags (comma-separated)', '_tags_str',
+    (d.tags || []).join(', '), d, dis, 'full');
 
-  if (d.kind === 'live_fish') {
-    const fp = d.fish_profile || {};
-    html += '<div class="fish-section"><h4>Fish care profile</h4><div class="fields">';
-    html += fishField('Common name', 'common_name', fp, d, dis, uncertain);
-    html += fishField('Scientific name', 'scientific_name', fp, d, dis, uncertain);
-    html += fishField('Adult size', 'adult_size', fp, d, dis, uncertain);
-    html += fishField('Min tank size', 'min_tank_size', fp, d, dis, uncertain);
-    html += fishField('Temperature', 'temperature_range', fp, d, dis, uncertain);
-    html += fishField('pH range', 'ph_range', fp, d, dis, uncertain);
-    html += fishField('Hardness', 'hardness', fp, d, dis, uncertain);
-    html += fishField('Temperament', 'temperament', fp, d, dis, uncertain);
-    html += fishField('Care level', 'care_level', fp, d, dis, uncertain);
-    html += fishField('Lifespan', 'lifespan', fp, d, dis, uncertain);
-    html += fishField('Compatible with', 'compatible_with', fp, d, dis, uncertain, 'full');
-    html += fishField('Avoid keeping with', 'avoid_with', fp, d, dis, uncertain, 'full');
-    html += fishFieldArea('Diet & feeding', 'diet', fp, d, dis, uncertain);
-    html += fishFieldArea('Species notes', 'species_notes', fp, d, dis, uncertain);
-    html += '</div></div>';
+  // Description — HTML; show a preview alongside the editor
+  html += '<div class="field full"><label>Description (HTML)</label>'
+    + '<textarea' + dis + ' onchange="upd(' + d.id +
+    ',\\'description\\',this.value)" style="min-height:140px;font-family:monospace;font-size:12px">'
+    + escape(d.description || '') + '</textarea></div>';
+  if (d.description) {
+    html += '<div class="field full"><label>Preview</label>'
+      + '<div class="desc-preview">' + d.description + '</div></div>';
   }
 
   html += '</div>'; // .fields
@@ -1241,6 +1265,35 @@ function renderDraft(d) {
   return html;
 }
 
+function categoryOptions(selectedName) {
+  let opts = '<option value="">— pick a category —</option>';
+  for (const c of CATEGORIES) {
+    opts += '<option value="' + escAttr(c.full_name) + '"' +
+      (c.full_name === selectedName ? ' selected' : '') + '>' +
+      escape(c.full_name) + '</option>';
+  }
+  return opts;
+}
+
+function brandOptions(selectedName) {
+  let opts = '<option value="">— none —</option>';
+  // Include the currently-selected brand even if it's not in the list
+  // (Claude might suggest a brand that isn't in your Lightspeed Brands)
+  let seen = new Set();
+  if (selectedName && !BRANDS.some(b => b.name === selectedName)) {
+    opts += '<option value="' + escAttr(selectedName) + '" selected>' +
+      escape(selectedName) + ' (new)</option>';
+    seen.add(selectedName);
+  }
+  for (const b of BRANDS) {
+    if (seen.has(b.name)) continue;
+    opts += '<option value="' + escAttr(b.name) + '"' +
+      (b.name === selectedName ? ' selected' : '') + '>' +
+      escape(b.name) + '</option>';
+  }
+  return opts;
+}
+
 function field(label, key, val, d, dis, full) {
   return '<div class="field ' + (full || '') + '"><label>' + label + '</label>'
     + '<input type="text" value="' + escAttr(val || '') + '"' + dis
@@ -1251,34 +1304,37 @@ function numField(label, key, val, d, dis) {
     + '<input type="number" step="0.01" value="' + (val != null ? val : '') + '"' + dis
     + ' onchange="upd(' + d.id + ',\\'' + key + '\\',parseFloat(this.value))" /></div>';
 }
-function fishField(label, key, fp, d, dis, uncertain, full) {
-  const isU = uncertain.includes(key);
-  return '<div class="field ' + (full || '') + (isU ? ' uncertain' : '') + '">'
-    + '<label>' + label + (isU ? ' <span class="uncertain-tag">verify</span>' : '') + '</label>'
-    + '<input type="text" value="' + escAttr(fp[key] || '') + '"' + dis
-    + ' onchange="updFish(' + d.id + ',\\'' + key + '\\',this.value)" /></div>';
-}
-function fishFieldArea(label, key, fp, d, dis, uncertain) {
-  const isU = uncertain.includes(key);
-  return '<div class="field full' + (isU ? ' uncertain' : '') + '">'
-    + '<label>' + label + (isU ? ' <span class="uncertain-tag">verify</span>' : '') + '</label>'
-    + '<textarea' + dis + ' onchange="updFish(' + d.id + ',\\'' + key +
-    '\\',this.value)">' + escape(fp[key] || '') + '</textarea></div>';
-}
 
 let saveTimers = {};
 function upd(id, key, value) {
   const d = DRAFTS.find(x => x.id === id);
   if (!d) return;
+  // Special handling for the comma-separated tags input
+  if (key === '_tags_str') {
+    const tagList = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+    d.tags = tagList;
+    scheduleSave(id, { tags: tagList });
+    return;
+  }
   d[key] = value;
   scheduleSave(id, { [key]: value });
 }
-function updFish(id, key, value) {
+function updCategory(id, name) {
   const d = DRAFTS.find(x => x.id === id);
   if (!d) return;
-  if (!d.fish_profile) d.fish_profile = {};
-  d.fish_profile[key] = value;
-  scheduleSave(id, { fish_profile: d.fish_profile });
+  d.product_category = name;
+  // Find the id from the list
+  const cat = CATEGORIES.find(c => c.full_name === name);
+  d.product_category_id = cat ? cat.id : null;
+  scheduleSave(id, { product_category: name, product_category_id: d.product_category_id });
+}
+function updBrand(id, name) {
+  const d = DRAFTS.find(x => x.id === id);
+  if (!d) return;
+  d.brand_name = name || null;
+  const brand = BRANDS.find(b => b.name === name);
+  d.brand_id = brand ? brand.id : null;
+  scheduleSave(id, { brand_name: d.brand_name, brand_id: d.brand_id });
 }
 function scheduleSave(id, patch) {
   clearTimeout(saveTimers[id]);

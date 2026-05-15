@@ -198,6 +198,27 @@ class LightspeedClient:
         )
         return data.get("data", [])
 
+    async def list_categories(self, *, page_size: int = 500) -> list[dict]:
+        """Return all product categories. X-Series supports hierarchy via
+        parent_id; categories are returned flat with parent references."""
+        data = await self._request(
+            "GET", "/product_categories", params={"page_size": page_size}
+        )
+        return data.get("data", [])
+
+    async def list_brands(self, *, page_size: int = 500) -> list[dict]:
+        """Return all brands."""
+        data = await self._request(
+            "GET", "/brands", params={"page_size": page_size}
+        )
+        return data.get("data", [])
+
+    async def list_tags(self, *, page_size: int = 500) -> list[dict]:
+        data = await self._request(
+            "GET", "/tags", params={"page_size": page_size}
+        )
+        return data.get("data", [])
+
     async def search_suppliers(self, query: str) -> list[dict]:
         """Substring search over supplier names. Case- and space-insensitive.
         Returns all suppliers whose name contains the query."""
@@ -408,6 +429,9 @@ class LightspeedClient:
         supply_price: float | None = None,
         retail_price: float | None = None,
         description: str | None = None,
+        brand_id: str | None = None,
+        category_id: str | None = None,
+        tag_ids: list[str] | None = None,
     ) -> dict:
         """Create a product in Lightspeed. Returns the new product dict."""
         payload: dict[str, Any] = {"name": name}
@@ -422,11 +446,18 @@ class LightspeedClient:
         if supply_price is not None:
             payload["supply_price"] = supply_price
         if retail_price is not None:
-            # X-Series stores retail price as a list of (price_book_id, price);
-            # the simplest write path is "price_excluding_tax" on default book.
             payload["price_excluding_tax"] = retail_price
         if description:
             payload["description"] = description
+        if brand_id:
+            payload["brand_id"] = brand_id
+        if category_id:
+            # X-Series field name has varied with API revisions; send both
+            # so whichever is current is honored, the other ignored.
+            payload["product_category_id"] = category_id
+            payload["category_id"] = category_id
+        if tag_ids:
+            payload["tag_ids"] = tag_ids
 
         data = await self._request("POST", "/products", json=payload)
         return data.get("data", data)

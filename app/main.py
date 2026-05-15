@@ -226,6 +226,40 @@ async def list_suppliers():
     return {"data": [{"id": s["id"], "name": s.get("name")} for s in suppliers]}
 
 
+@app.get("/categories", dependencies=[Depends(require_auth)])
+async def list_categories_endpoint():
+    """List product categories as full-path leaf names like
+    'Freshwater Fish / Cichlids'. Only leaf categories are returned —
+    products shouldn't be assigned to parent categories."""
+    try:
+        cats = await _client().list_categories()
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    items = []
+    for c in cats:
+        if not c.get("leaf_category"):
+            continue
+        path = c.get("category_path") or []
+        if path:
+            full = " / ".join(p.get("name", "") for p in path if p.get("name"))
+        else:
+            full = c.get("name") or ""
+        items.append({"id": c["id"], "name": c.get("name"), "full_name": full})
+    items.sort(key=lambda x: x["full_name"].lower())
+    return {"data": items}
+
+
+@app.get("/brands", dependencies=[Depends(require_auth)])
+async def list_brands_endpoint():
+    try:
+        brands = await _client().list_brands()
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    items = [{"id": b["id"], "name": b.get("name")} for b in brands if b.get("name")]
+    items.sort(key=lambda x: (x["name"] or "").lower())
+    return {"data": items}
+
+
 # --------------------------------------------------------------------- #
 # Upload / process                                                      #
 # --------------------------------------------------------------------- #
@@ -1025,6 +1059,36 @@ async def _enrich_pending_drafts(batch_id: str):
     """Background task: draft content for every PENDING_ENRICH row in a
     batch, one at a time. Marks each DRAFT when done, or records error.
     Runs in its own DB session since the request session has closed."""
+    # Fetch the user's category and brand lists ONCE per batch so Claude
+    # can pick from real values. Only LEAF categories are offered — products
+    # shouldn't be assigned to parent categories.
+    client = getattr(app.state, "lightspeed", None)
+    category_names: list[str] = []
+    brand_names: list[str] = []
+    if client:
+        try:
+            cats = await client.list_categories()
+            # The /product_categories API gives us category_path directly,
+            # which already includes all ancestors. We only want leaves.
+            leaf_names = []
+            for c in cats:
+                if not c.get("leaf_category"):
+                    continue
+                path = c.get("category_path") or []
+                if path:
+                    full = " / ".join(p.get("name", "") for p in path if p.get("name"))
+                    leaf_names.append(full)
+                elif c.get("name"):
+                    leaf_names.append(c["name"])
+            category_names = sorted(set(leaf_names))
+        except Exception as exc:
+            logger.warning("Could not list categories: %s", exc)
+        try:
+            brands = await client.list_brands()
+            brand_names = sorted({b.get("name") for b in brands if b.get("name")})
+        except Exception as exc:
+            logger.warning("Could not list brands: %s", exc)
+
     async with session_scope() as session:
         rows = (await session.execute(
             select(EnrichmentDraft)
@@ -1033,13 +1097,23 @@ async def _enrich_pending_drafts(batch_id: str):
         )).scalars().all()
         for draft in rows:
             name = draft.final_name or draft.input_name
-            kind_hint = draft.kind if draft.kind in ("dry_good", "live_fish") else None
+            kind_hint = draft.kind if draft.kind in (
+                "dry_good", "live_fish", "live_invert", "live_plant", "live_coral"
+            ) else None
             try:
-                result = await enrich_product(name, kind_hint=kind_hint)
+                result = await enrich_product(
+                    name,
+                    barcode=draft.barcode,
+                    kind_hint=kind_hint,
+                    available_categories=category_names,
+                    available_brands=brand_names,
+                )
                 draft.kind = result.kind
-                draft.description = result.description
-                draft.fish_profile = _fish_profile_to_dict(result.fish_profile)
-                draft.detected_brand = result.detected_brand
+                draft.final_name = result.cleaned_name or draft.final_name or name
+                draft.description = result.description_html
+                draft.product_category = result.product_category
+                draft.brand_name = result.brand_name
+                draft.tags = {"list": result.suggested_tags} if result.suggested_tags else None
                 draft.warnings = {"list": result.warnings} if result.warnings else None
                 draft.status = "DRAFT"
             except EnrichmentError as exc:
@@ -1052,80 +1126,48 @@ async def _enrich_pending_drafts(batch_id: str):
 class EnrichItemIn(BaseModel):
     name: str
     supplier_name: str | None = None
-    kind_hint: str | None = None  # 'dry_good' | 'live_fish' | None
+    kind_hint: str | None = None  # 'dry_good' | 'live_fish' | 'live_invert' | 'live_plant' | 'live_coral'
 
 
 class EnrichBatchRequest(BaseModel):
     items: list[EnrichItemIn]
 
 
-def _fish_profile_to_dict(fp) -> dict | None:
-    if fp is None:
-        return None
-    return {
-        "common_name": fp.common_name,
-        "scientific_name": fp.scientific_name,
-        "adult_size": fp.adult_size,
-        "min_tank_size": fp.min_tank_size,
-        "temperature_range": fp.temperature_range,
-        "ph_range": fp.ph_range,
-        "hardness": fp.hardness,
-        "temperament": fp.temperament,
-        "care_level": fp.care_level,
-        "lifespan": fp.lifespan,
-        "compatible_with": fp.compatible_with,
-        "avoid_with": fp.avoid_with,
-        "diet": fp.diet,
-        "species_notes": fp.species_notes,
-        "uncertain_fields": fp.uncertain_fields,
-    }
-
-
 @app.post("/enrich/batch", dependencies=[Depends(require_auth)])
 async def enrich_products_batch(
     body: EnrichBatchRequest,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(_session),
 ):
-    """Enrich a batch of products. Each gets a draft (description or fish
-    profile) and is stored as an EnrichmentDraft for review."""
+    """Enrich a batch of products. Each gets queued as PENDING_ENRICH and
+    a background task drafts content for all of them."""
     if not body.items:
         raise HTTPException(400, "No products submitted")
     if len(body.items) > 100:
         raise HTTPException(400, "Max 100 products per batch")
 
     batch_id = _uuid.uuid4().hex[:12]
-    products = [
-        {
-            "name": i.name,
-            "supplier_name": i.supplier_name,
-            "kind_hint": i.kind_hint if i.kind_hint in ("dry_good", "live_fish") else None,
-        }
-        for i in body.items if i.name and i.name.strip()
-    ]
-
-    results = await enrich_batch(products)
-
-    draft_ids = []
-    for result in results:
+    valid_kinds = ("dry_good", "live_fish", "live_invert", "live_plant", "live_coral")
+    for item in body.items:
+        if not item.name or not item.name.strip():
+            continue
+        kind = item.kind_hint if item.kind_hint in valid_kinds else "unknown"
         draft = EnrichmentDraft(
             batch_id=batch_id,
-            input_name=result.input_name,
-            kind=result.kind,
-            description=result.description,
-            fish_profile=_fish_profile_to_dict(result.fish_profile),
-            detected_brand=result.detected_brand,
-            final_name=result.input_name,
-            warnings={"list": result.warnings} if result.warnings else None,
-            status="DRAFT",
+            input_name=item.name.strip(),
+            final_name=item.name.strip(),
+            kind=kind,
+            status="PENDING_ENRICH",
         )
         session.add(draft)
-        await session.flush()
-        draft_ids.append(draft.id)
+    await session.flush()
+
+    # Run drafting in background so the response is fast
+    background_tasks.add_task(_enrich_pending_drafts, batch_id)
 
     return {
         "batch_id": batch_id,
-        "count": len(draft_ids),
-        "draft_ids": draft_ids,
+        "count": len(body.items),
         "redirect": f"/enrich/review/{batch_id}",
     }
 
@@ -1151,8 +1193,6 @@ def _draft_to_dict(d: EnrichmentDraft) -> dict:
         "input_name": d.input_name,
         "kind": d.kind,
         "description": d.description,
-        "fish_profile": d.fish_profile,
-        "detected_brand": d.detected_brand,
         "final_name": d.final_name,
         "sku": d.sku,
         "barcode": d.barcode,
@@ -1161,11 +1201,15 @@ def _draft_to_dict(d: EnrichmentDraft) -> dict:
         "supply_price": d.supply_price,
         "retail_price": d.retail_price,
         "has_photo": d.has_photo,
+        "product_category": d.product_category,
+        "product_category_id": d.product_category_id,
+        "brand_name": d.brand_name,
+        "brand_id": d.brand_id,
+        "tags": (d.tags or {}).get("list", []),
         "status": d.status,
         "lightspeed_product_id": d.lightspeed_product_id,
         "warnings": (d.warnings or {}).get("list", []),
         "error": d.error,
-        # Source context (when queued from an invoice)
         "source_invoice_id": d.source_invoice_id,
         "source_consignment_id": d.source_consignment_id,
         "source_quantity": d.source_quantity,
@@ -1177,7 +1221,6 @@ class DraftUpdate(BaseModel):
     final_name: str | None = None
     kind: str | None = None
     description: str | None = None
-    fish_profile: dict | None = None
     sku: str | None = None
     barcode: str | None = None
     supplier_id: str | None = None
@@ -1185,6 +1228,11 @@ class DraftUpdate(BaseModel):
     supply_price: float | None = None
     retail_price: float | None = None
     has_photo: bool | None = None
+    product_category: str | None = None
+    product_category_id: str | None = None
+    brand_name: str | None = None
+    brand_id: str | None = None
+    tags: list[str] | None = None
 
 
 @app.put("/enrich/draft/{draft_id}", dependencies=[Depends(require_auth)])
@@ -1202,20 +1250,25 @@ async def update_draft(
         raise HTTPException(409, "This product was already created")
 
     for fieldname in (
-        "final_name", "kind", "description", "fish_profile", "sku",
-        "barcode", "supplier_id", "supplier_code", "supply_price",
-        "retail_price", "has_photo",
+        "final_name", "kind", "description", "sku", "barcode",
+        "supplier_id", "supplier_code", "supply_price", "retail_price",
+        "has_photo", "product_category", "product_category_id",
+        "brand_name", "brand_id",
     ):
         val = getattr(body, fieldname)
         if val is not None:
             setattr(draft, fieldname, val)
+    if body.tags is not None:
+        draft.tags = {"list": body.tags}
 
     return {"ok": True, "draft": _draft_to_dict(draft)}
 
 
 @app.post("/enrich/draft/{draft_id}/reenrich", dependencies=[Depends(require_auth)])
 async def reenrich_draft(
-    draft_id: int, session: AsyncSession = Depends(_session),
+    draft_id: int,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(_session),
 ):
     """Re-run enrichment on a draft — useful after changing the kind hint
     or fixing the product name."""
@@ -1227,18 +1280,9 @@ async def reenrich_draft(
     if draft.status == "CREATED":
         raise HTTPException(409, "This product was already created")
 
-    name = draft.final_name or draft.input_name
-    kind_hint = draft.kind if draft.kind in ("dry_good", "live_fish") else None
-    try:
-        result = await enrich_product(name, kind_hint=kind_hint)
-    except EnrichmentError as exc:
-        raise HTTPException(502, f"Re-enrichment failed: {exc}")
-
-    draft.kind = result.kind
-    draft.description = result.description
-    draft.fish_profile = _fish_profile_to_dict(result.fish_profile)
-    draft.detected_brand = result.detected_brand
-    draft.warnings = {"list": result.warnings} if result.warnings else None
+    draft.status = "PENDING_ENRICH"
+    draft.error = None
+    background_tasks.add_task(_enrich_pending_drafts, draft.batch_id)
     return {"ok": True, "draft": _draft_to_dict(draft)}
 
 
@@ -1259,19 +1303,39 @@ async def create_from_draft(
     if not name:
         raise HTTPException(400, "Product needs a name")
 
-    # Build description: fish profile renders to formatted text; dry goods
-    # use the drafted description directly.
-    if draft.kind == "live_fish" and draft.fish_profile:
-        from app.enrichment import FishProfile
-        fp = FishProfile(**{
-            k: v for k, v in draft.fish_profile.items()
-            if k != "uncertain_fields"
-        })
-        description = fp.to_description()
-    else:
-        description = draft.description
-
     client = _client()
+
+    # Resolve category name to id (if user picked a name but no id)
+    category_id = draft.product_category_id
+    if not category_id and draft.product_category:
+        try:
+            cats = await client.list_categories()
+            for c in cats:
+                if not c.get("leaf_category"):
+                    continue
+                path = c.get("category_path") or []
+                if path:
+                    full = " / ".join(p.get("name", "") for p in path if p.get("name"))
+                else:
+                    full = c.get("name") or ""
+                if full == draft.product_category:
+                    category_id = c["id"]
+                    break
+        except Exception as exc:
+            logger.warning("Category resolve failed: %s", exc)
+
+    # Resolve brand name to id
+    brand_id = draft.brand_id
+    if not brand_id and draft.brand_name:
+        try:
+            brands = await client.list_brands()
+            for b in brands:
+                if (b.get("name") or "").strip().lower() == draft.brand_name.strip().lower():
+                    brand_id = b["id"]
+                    break
+        except Exception as exc:
+            logger.warning("Brand resolve failed: %s", exc)
+
     try:
         created = await client.create_product(
             name=name,
@@ -1281,7 +1345,9 @@ async def create_from_draft(
             barcode=draft.barcode,
             supply_price=draft.supply_price,
             retail_price=draft.retail_price,
-            description=description,
+            description=draft.description,
+            brand_id=brand_id,
+            category_id=category_id,
         )
     except LightspeedError as exc:
         draft.error = str(exc)
@@ -1294,10 +1360,11 @@ async def create_from_draft(
 
     draft.status = "CREATED"
     draft.lightspeed_product_id = new_id
+    draft.product_category_id = category_id
+    draft.brand_id = brand_id
     draft.error = None
 
-    # If this draft came from an invoice that already has a consignment,
-    # add the new product to that consignment now.
+    # Add to source consignment if there is one
     added_to_consignment = False
     if draft.source_consignment_id and draft.source_quantity:
         try:
@@ -1312,7 +1379,6 @@ async def create_from_draft(
             )
             added_to_consignment = True
         except LightspeedError as exc:
-            # Don't fail the create — the product exists. Surface a warning.
             warns = (draft.warnings or {}).get("list", [])
             warns.append(
                 f"Created the product, but failed to add it to consignment "
@@ -1321,7 +1387,6 @@ async def create_from_draft(
             )
             draft.warnings = {"list": warns}
 
-    # Save a supplier-code mapping so the next invoice resolves automatically
     if draft.supplier_id and draft.supplier_code:
         await upsert_mapping(
             session,

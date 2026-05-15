@@ -1,0 +1,10 @@
+$kind: collection
+name: Lightspeed X-Series Bulk Product Categories
+variables:
+  LIGHTSPEED_DOMAIN_PREFIX: your-store-prefix
+  LIGHTSPEED_ACCESS_TOKEN: your-access-token
+  personal_token: ""
+auth:
+  type: bearer
+  credentials:
+    token: lsxs_pt_x4QqgUmkMrykzuMtw71nHTEqmVkE4ply

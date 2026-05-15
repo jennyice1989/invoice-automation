@@ -1,0 +1,138 @@
+$kind: http-request
+name: Delete All Product Types
+url: 'https://{{domain_prefix}}.retail.lightspeed.app/api/2.0/product_types'
+method: GET
+headers:
+  Accept: application/json
+auth:
+  type: bearer
+  credentials:
+    token: '{{personal_token}}'
+scripts:
+  - type: beforeRequest
+    code: |-
+      // Fetch all existing product types, then delete each one before the bulk create runs.
+      const baseUrl = 'https://' + (pm.environment.get('domain_prefix') || pm.collectionVariables.get('domain_prefix')) + '.retail.lightspeed.app/api/2.0';
+
+      const token = pm.environment.get('personal_token') || pm.collectionVariables.get('personal_token');
+
+      pm.sendRequest({
+        url: baseUrl + '/product_types',
+        method: 'GET',
+        header: {
+          'Accept': 'application/json',
+          'Authorization': 'Bearer ' + token
+        }
+      }, function (err, res) {
+        if (err) {
+          console.error('Failed to fetch product types:', err);
+          return;
+        }
+
+        const body = res.json();
+        const types = body.data || body;
+
+        if (!Array.isArray(types) || types.length === 0) {
+          console.log('No existing product types to delete.');
+          return;
+        }
+
+        console.log('Deleting ' + types.length + ' product type(s)...');
+
+        // Delete each product type sequentially
+        function deleteNext(index) {
+          if (index >= types.length) {
+            console.log('All product types deleted.');
+            return;
+          }
+
+          const pt = types[index];
+          pm.sendRequest({
+            url: baseUrl + '/product_types/' + pt.id,
+            method: 'DELETE',
+            header: {
+              'Accept': 'application/json',
+              'Authorization': 'Bearer ' + token
+            }
+          }, function (delErr, delRes) {
+            if (delErr || (delRes.code !== 200 && delRes.code !== 204)) {
+              console.warn('Failed to delete product type "' + pt.name + '" (id: ' + pt.id + '): ' + (delErr || delRes.code));
+            } else {
+              console.log('Deleted: ' + pt.name + ' (id: ' + pt.id + ')');
+            }
+            deleteNext(index + 1);
+          });
+        }
+
+        deleteNext(0);
+      });
+    language: text/javascript
+  - type: afterResponse
+    code: |-
+      // Guard: skip processing if the response is not a successful JSON response
+      let body;
+      try {
+        body = pm.response.json();
+      } catch (e) {
+        console.warn('afterResponse: could not parse response as JSON (status ' + pm.response.code + '). Skipping.');
+        return;
+      }
+
+      if (pm.response.code !== 200) {
+        console.warn('afterResponse: unexpected status ' + pm.response.code + ' – ' + JSON.stringify(body));
+        pm.test('All product types deleted – final GET returns 200', function () {
+          pm.response.to.have.status(200);
+        });
+        return;
+      }
+
+      const types = body.data || body;
+      const count = Array.isArray(types) ? types.length : 0;
+
+      pm.test('All product types deleted – final GET returns 200', function () {
+        pm.response.to.have.status(200);
+      });
+
+      console.log('Product types remaining after delete pass: ' + count);
+
+      // Visualization
+      const template = `
+        <html>
+        <head>
+          <style>
+            body { font-family: sans-serif; background: #fff; padding: 16px; color: #333; }
+            .empty { background: #e6f9ee; color: #1a7a3f; border: 1px solid #a3d9b1; border-radius: 6px; padding: 12px 16px; font-size: 14px; }
+            .warning { font-size: 14px; font-weight: bold; color: #856404; background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+            table { border-collapse: collapse; width: 100%; font-size: 13px; }
+            th { background: #f0f0f0; text-align: left; padding: 8px 12px; border: 1px solid #ccc; }
+            td { padding: 7px 12px; border: 1px solid #ddd; }
+            tr:nth-child(even) td { background: #fafafa; }
+          </style>
+        </head>
+        <body>
+          {{#if empty}}
+            <div class="empty">✅ No product types found — nothing to delete.</div>
+          {{else}}
+            <div class="warning">⚠️ {{count}} product type(s) found in response</div>
+            <table>
+              <thead><tr><th>ID</th><th>Name</th></tr></thead>
+              <tbody>
+                {{#each rows}}
+                  <tr><td>{{id}}</td><td>{{name}}</td></tr>
+                {{/each}}
+              </tbody>
+            </table>
+          {{/if}}
+        </body>
+        </html>
+      `;
+
+      const vizData = {
+        empty: count === 0,
+        count: count,
+        rows: Array.isArray(types) ? types.map(function(t) { return { id: t.id, name: t.name }; }) : []
+      };
+
+      pm.visualizer.set(template, vizData);
+    language: text/javascript
+order: 6069

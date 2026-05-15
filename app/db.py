@@ -220,6 +220,13 @@ class EnrichmentDraft(Base):
     retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     has_photo: Mapped[bool] = mapped_column(default=False)
 
+    # New: catalog organization
+    product_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    product_category_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    brand_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    brand_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {"list": [...]}
+
     status: Mapped[str] = mapped_column(String(16), default="DRAFT")  # DRAFT | CREATED | SKIPPED
     lightspeed_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     warnings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -312,6 +319,11 @@ async def init_db() -> None:
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_consignment_id VARCHAR(64)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_cost DOUBLE PRECISION",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS product_category VARCHAR(255)",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS product_category_id VARCHAR(64)",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS brand_name VARCHAR(255)",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS brand_id VARCHAR(64)",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS tags JSONB",
         ):
             try:
                 await conn.execute(text(stmt))

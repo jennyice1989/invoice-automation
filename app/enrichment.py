@@ -1,16 +1,22 @@
 """
 Product enrichment via Claude.
 
-Two paths:
-  - Dry goods: draft a retail-quality product description from the name
-    + brand knowledge.
-  - Live fish: draft a structured care profile (water params, tankmates,
-    diet, etc.) with explicit uncertainty flags.
+Drafts a retail-quality HTML product description in the style of A2Z
+Aquariums' existing catalog (h3 heading, paragraph structure, brand
+mentions). For live fish, care details are woven into the prose
+naturally rather than living in a separate structured template.
 
-The classifier decides which path a product takes; the user can override.
+What Claude DRAFTS:
+  - name (cleaned up if the input is a supplier abbreviation)
+  - description (HTML)
+  - product_category (picked from the real list provided)
+  - brand_name (inferred from product name)
+  - tags (suggested)
 
-Nothing factual that Claude can't reliably know (UPC, exact photo) is
-invented here — those fields stay empty for the user to fill.
+What stays manual (Claude never invents):
+  - UPC / barcode
+  - product photo (still manual)
+  - exact retail price (rules engine handles this elsewhere)
 """
 
 from __future__ import annotations
@@ -35,137 +41,142 @@ class EnrichmentError(Exception):
     pass
 
 
-ProductKind = Literal["dry_good", "live_fish", "unknown"]
-
-
-@dataclass
-class FishProfile:
-    """Structured care profile for live aquatic livestock."""
-    common_name: str | None = None
-    scientific_name: str | None = None
-    adult_size: str | None = None
-    min_tank_size: str | None = None
-    temperature_range: str | None = None
-    ph_range: str | None = None
-    hardness: str | None = None
-    temperament: str | None = None
-    care_level: str | None = None
-    lifespan: str | None = None
-    compatible_with: str | None = None
-    avoid_with: str | None = None
-    diet: str | None = None
-    species_notes: str | None = None
-    # Fields Claude flagged as uncertain — surfaced in the review UI.
-    uncertain_fields: list[str] = field(default_factory=list)
-
-    def to_description(self) -> str:
-        """Render the profile as a formatted description for Lightspeed."""
-        lines = []
-        if self.scientific_name:
-            lines.append(f"Scientific name: {self.scientific_name}")
-        if self.adult_size:
-            lines.append(f"Adult size: {self.adult_size}")
-        if self.min_tank_size:
-            lines.append(f"Minimum tank size: {self.min_tank_size}")
-        params = []
-        if self.temperature_range:
-            params.append(f"temp {self.temperature_range}")
-        if self.ph_range:
-            params.append(f"pH {self.ph_range}")
-        if self.hardness:
-            params.append(f"hardness {self.hardness}")
-        if params:
-            lines.append("Water parameters: " + ", ".join(params))
-        if self.temperament:
-            lines.append(f"Temperament: {self.temperament}")
-        if self.care_level:
-            lines.append(f"Care level: {self.care_level}")
-        if self.lifespan:
-            lines.append(f"Lifespan: {self.lifespan}")
-        if self.compatible_with:
-            lines.append(f"Compatible with: {self.compatible_with}")
-        if self.avoid_with:
-            lines.append(f"Avoid keeping with: {self.avoid_with}")
-        if self.diet:
-            lines.append(f"Diet: {self.diet}")
-        if self.species_notes:
-            lines.append("")
-            lines.append(self.species_notes)
-        return "\n".join(lines)
+ProductKind = Literal["dry_good", "live_fish", "live_invert", "live_plant", "live_coral", "unknown"]
 
 
 @dataclass
 class EnrichmentResult:
-    """Output of enriching one product."""
+    """What Claude drafts for one product."""
     input_name: str
-    kind: ProductKind
-    description: str | None = None
-    fish_profile: FishProfile | None = None
-    # Brand Claude inferred, if any (helps with manual photo sourcing).
-    detected_brand: str | None = None
+    cleaned_name: str | None = None
+    kind: ProductKind = "unknown"
+    description_html: str | None = None
+    product_category: str | None = None  # exact match from provided list
+    brand_name: str | None = None
+    suggested_tags: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------- #
-# Prompts                                                               #
+# Prompt                                                                #
 # --------------------------------------------------------------------- #
 
-_CLASSIFY_AND_ENRICH_PROMPT = """You are helping a specialty aquarium and pet store enrich its product catalog.
+_STYLE_GUIDE = """STYLE GUIDE (match this voice exactly):
 
-You will be given a product name (and possibly a supplier name). Do two things:
+You are writing retail descriptions for A2Z Aquariums, a specialty aquarium
+and pet store. Descriptions appear on the product page of their online store
+and should help customers decide whether the product is right for them.
 
-1. CLASSIFY the product as one of:
-   - "live_fish": a living aquatic animal or plant sold as livestock
-     (fish, shrimp, snails, corals, live aquatic plants)
-   - "dry_good": any non-living product (food, equipment, treatments,
-     decor, filters, heaters, supplements, etc.)
-   - "unknown": you genuinely cannot tell from the name
+FORMAT (mandatory):
+- HTML using <h3>, <p>, <strong>, and <em> tags only
+- Open with a single <h3> heading: "<Product Name> – <Hook>"
+- Then 2-3 <p> paragraphs
+- Total length: 400-700 characters of visible text (not counting HTML)
+- End with brand attribution: "Available at <strong>A2Z Aquariums</strong>"
 
-2. ENRICH based on the classification:
+TONE:
+- Confident and informative, never generic
+- NEVER use these clichés: "transform your aquarium", "elevate your",
+  "underwater paradise", "hand-selected", "must-have", "whether you're
+  a seasoned aquarist or just starting", "captivating", "mesmerizing"
+- DO mention specific facts: dimensions, capacity, materials, species
+  characteristics, care needs, brand reputation
+- For dry goods: explain what it is, what it does, who it's for, and
+  one specific detail (dosing, compatibility, capacity, etc.)
+- For live fish/inverts/corals/plants: weave care info into the prose
+  naturally — adult size, minimum tank, water parameters, temperament,
+  compatibility, diet — as part of the description, not as a list
 
-FOR dry_good — write a retail product description:
-   - 2-4 sentences, accurate and useful to a customer
-   - Describe what the product is and its main use/benefit
-   - Mention the brand if identifiable from the name
-   - Do NOT invent specifications you don't know (exact dimensions,
-     exact ingredient lists, wattage unless it's in the name)
-   - Do NOT invent a UPC or barcode
-   - Natural retail copy, not a spec sheet
+EXAMPLE OF THE TARGET STYLE (live fish):
 
-FOR live_fish — produce a structured care profile. For EACH field, only
-fill it if you are reasonably confident. If you are uncertain about a
-field, still provide your best estimate but add the field name to
-"uncertain_fields". Care information for common aquarium species is
-well-documented; for unusual species, be honest about uncertainty.
+<h3>Electric Blue Acara – Brilliant Color, Easygoing Personality</h3>
+<p>The <strong>Electric Blue Acara</strong> (<em>Andinoacara pulcher</em>)
+is one of the most striking cichlids you can keep, with shimmering
+metallic-blue scales and a peaceful temperament that makes it a standout
+centerpiece for community tanks. Reaching 6–7 inches at maturity, this
+hardy South American native is one of the few cichlids genuinely suited
+to mixed setups.</p>
+<p><strong>Tank requirements:</strong> 30 gallons minimum, soft to
+moderately hard water (pH 6.5–7.5, 72–82°F). They pair well with larger
+tetras, plecos, corydoras, and other peaceful cichlids. Avoid keeping
+with very small fish or long-finned species.</p>
+<p>Hand-picked for color and health. Available at
+<strong>A2Z Aquariums</strong>.</p>
 
-Return ONLY a JSON object, no other text:
+EXAMPLE OF THE TARGET STYLE (dry good):
 
-{
-  "kind": "dry_good" | "live_fish" | "unknown",
-  "detected_brand": "brand name if identifiable, else null",
-  "description": "retail description (for dry_good; null for live_fish)",
-  "fish_profile": {
-    "common_name": "...",
-    "scientific_name": "...",
-    "adult_size": "e.g. '3 inches (7.5 cm)'",
-    "min_tank_size": "e.g. '20 gallons'",
-    "temperature_range": "e.g. '72-82°F (22-28°C)'",
-    "ph_range": "e.g. '6.5-7.5'",
-    "hardness": "e.g. '5-15 dGH'",
-    "temperament": "Peaceful | Semi-aggressive | Aggressive",
-    "care_level": "Beginner | Intermediate | Advanced",
-    "lifespan": "e.g. '5-8 years'",
-    "compatible_with": "brief list of good tankmates",
-    "avoid_with": "brief list of incompatible species",
-    "diet": "what it eats + feeding notes",
-    "species_notes": "1-3 sentences: breeding, sexing, common health issues, or other notable info"
-  },
-  "uncertain_fields": ["list of fish_profile field names you're not confident about"]
-}
+<h3>Seachem Prime 500ml – Water Conditioner for Fresh & Saltwater</h3>
+<p>Seachem <strong>Prime</strong> is the industry-standard water
+conditioner, removing chlorine and chloramine while neutralizing ammonia
+and nitrite. A single 500ml bottle treats 5,000 gallons, making it one
+of the most cost-effective conditioners on the market.</p>
+<p>Use 5ml (one capful) per 50 gallons during water changes, or as an
+emergency detoxifier if ammonia or nitrite spike. Safe for fresh and
+saltwater, planted tanks, and reef systems.</p>
+<p>Available at <strong>A2Z Aquariums</strong>.</p>
+"""
 
-For dry_good, set fish_profile to null and uncertain_fields to [].
-For live_fish, set description to null.
-Return ONLY the JSON object."""
+
+def _build_prompt(
+    product_name: str,
+    supplier_name: str | None,
+    barcode: str | None,
+    kind_hint: ProductKind | None,
+    available_categories: list[str],
+    available_brands: list[str],
+) -> str:
+    cat_list = "\n".join(f"  - {c}" for c in available_categories) or "  (none provided)"
+    brand_list = ", ".join(available_brands[:80]) if available_brands else "(none provided)"
+
+    extra = []
+    if supplier_name:
+        extra.append(f"Supplier: {supplier_name}")
+    if barcode:
+        extra.append(f"Barcode/UPC: {barcode}")
+    if kind_hint and kind_hint != "unknown":
+        extra.append(f"Product type (already classified): {kind_hint}")
+    extras = ("\n" + "\n".join(extra)) if extra else ""
+
+    return f"""You are enriching a product for a specialty aquarium retailer's online catalog.
+
+PRODUCT TO ENRICH:
+Name (as it appears on the invoice or list, may be abbreviated): {product_name}{extras}
+
+TASK — return a JSON object with these fields:
+
+1. "cleaned_name": If the input name is a supplier abbreviation (e.g.
+   "AQE TNK BK TRIMSIL 125G" or "SLI COND PRIME 50ML"), expand it to a
+   proper retail name ("Aqueon Tank Background Trimsil 125g", "Seachem
+   Prime Water Conditioner 50ml"). If the input is already a clean name,
+   echo it back unchanged. Use the supplier context above to help guess
+   the brand.
+
+2. "kind": one of "dry_good", "live_fish", "live_invert" (shrimp, snails,
+   sea stars, etc.), "live_plant", "live_coral", or "unknown".
+
+3. "product_category": pick the SINGLE BEST match from this exact list of
+   the retailer's existing categories. You MUST return one of these
+   strings verbatim, or null if truly nothing fits. Do not invent new
+   categories.
+{cat_list}
+
+4. "brand_name": the manufacturer brand if identifiable from the name
+   (Aqueon, Seachem, API, Fluval, Hikari, Tetra, CaribSea, etc.). If
+   the name doesn't contain a recognizable brand, use null. If you
+   recognize a brand that appears in this list, use the exact spelling
+   from the list:
+{brand_list}
+
+5. "description_html": A retail HTML description following the style guide
+   below. This is the main output.
+
+6. "suggested_tags": Up to 5 short keywords useful for filtering/search
+   (e.g. ["freshwater", "beginner", "peaceful"] for a fish, or
+   ["water-care", "freshwater", "saltwater"] for a conditioner). Lowercase.
+
+{_STYLE_GUIDE}
+
+Return ONLY the JSON object — no markdown fences, no prose before or after."""
 
 
 # --------------------------------------------------------------------- #
@@ -174,34 +185,32 @@ Return ONLY the JSON object."""
 
 async def enrich_product(
     product_name: str,
+    *,
     supplier_name: str | None = None,
+    barcode: str | None = None,
     kind_hint: ProductKind | None = None,
+    available_categories: list[str] | None = None,
+    available_brands: list[str] | None = None,
 ) -> EnrichmentResult:
-    """Enrich a single product. kind_hint, if given, forces the classification
-    (used when the user has already tagged the product type)."""
+    """Enrich a single product."""
     if not ANTHROPIC_API_KEY:
         raise EnrichmentError("ANTHROPIC_API_KEY not configured")
     if not product_name or not product_name.strip():
         raise EnrichmentError("Empty product name")
 
-    user_content = f"Product name: {product_name.strip()}"
-    if supplier_name:
-        user_content += f"\nSupplier: {supplier_name.strip()}"
-    if kind_hint and kind_hint != "unknown":
-        user_content += (
-            f"\n\nThe user has already classified this as: {kind_hint}. "
-            f"Use that classification."
-        )
+    prompt = _build_prompt(
+        product_name=product_name.strip(),
+        supplier_name=supplier_name,
+        barcode=barcode,
+        kind_hint=kind_hint,
+        available_categories=available_categories or [],
+        available_brands=available_brands or [],
+    )
 
     payload = {
         "model": ANTHROPIC_MODEL,
         "max_tokens": 2000,
-        "messages": [
-            {
-                "role": "user",
-                "content": f"{_CLASSIFY_AND_ENRICH_PROMPT}\n\n---\n\n{user_content}",
-            }
-        ],
+        "messages": [{"role": "user", "content": prompt}],
     }
 
     async with httpx.AsyncClient(timeout=90.0) as client:
@@ -225,34 +234,38 @@ async def enrich_product(
         b.get("text", "") for b in data.get("content", [])
         if b.get("type") == "text"
     ).strip()
-
     parsed = _parse_json(text)
-    return _to_result(product_name, parsed)
+    return _to_result(product_name, parsed, available_categories or [])
 
 
 async def enrich_batch(
     products: list[dict],
+    *,
+    available_categories: list[str] | None = None,
+    available_brands: list[str] | None = None,
 ) -> list[EnrichmentResult]:
-    """Enrich a list of products. Each dict: {name, supplier_name?, kind_hint?}.
+    """Enrich a list of products sequentially.
 
-    Runs sequentially — a few dozen products is fine, and sequential keeps
-    us well clear of API rate limits without added complexity.
+    Each dict: {name, supplier_name?, barcode?, kind_hint?}
     """
     results: list[EnrichmentResult] = []
     for p in products:
         try:
-            result = await enrich_product(
+            r = await enrich_product(
                 p["name"],
                 supplier_name=p.get("supplier_name"),
+                barcode=p.get("barcode"),
                 kind_hint=p.get("kind_hint"),
+                available_categories=available_categories,
+                available_brands=available_brands,
             )
         except EnrichmentError as exc:
-            result = EnrichmentResult(
+            r = EnrichmentResult(
                 input_name=p.get("name", "?"),
                 kind="unknown",
                 warnings=[f"Enrichment failed: {exc}"],
             )
-        results.append(result)
+        results.append(r)
     return results
 
 
@@ -282,58 +295,41 @@ def _s(v) -> str | None:
     return s or None
 
 
-def _to_result(input_name: str, parsed: dict) -> EnrichmentResult:
+def _to_result(
+    input_name: str, parsed: dict, available_categories: list[str],
+) -> EnrichmentResult:
     kind = parsed.get("kind", "unknown")
-    if kind not in ("dry_good", "live_fish", "unknown"):
+    valid_kinds = ("dry_good", "live_fish", "live_invert", "live_plant", "live_coral", "unknown")
+    if kind not in valid_kinds:
         kind = "unknown"
 
     warnings: list[str] = []
-    fish_profile = None
 
-    if kind == "live_fish":
-        fp = parsed.get("fish_profile") or {}
-        fish_profile = FishProfile(
-            common_name=_s(fp.get("common_name")) or input_name,
-            scientific_name=_s(fp.get("scientific_name")),
-            adult_size=_s(fp.get("adult_size")),
-            min_tank_size=_s(fp.get("min_tank_size")),
-            temperature_range=_s(fp.get("temperature_range")),
-            ph_range=_s(fp.get("ph_range")),
-            hardness=_s(fp.get("hardness")),
-            temperament=_s(fp.get("temperament")),
-            care_level=_s(fp.get("care_level")),
-            lifespan=_s(fp.get("lifespan")),
-            compatible_with=_s(fp.get("compatible_with")),
-            avoid_with=_s(fp.get("avoid_with")),
-            diet=_s(fp.get("diet")),
-            species_notes=_s(fp.get("species_notes")),
-            uncertain_fields=parsed.get("uncertain_fields") or [],
-        )
-        if fish_profile.uncertain_fields:
-            warnings.append(
-                "Claude flagged uncertainty on: "
-                + ", ".join(fish_profile.uncertain_fields)
-                + ". Verify these before publishing."
-            )
-        if not fish_profile.scientific_name:
-            warnings.append("No scientific name identified — double-check the species.")
-
-    description = None
-    if kind == "dry_good":
-        description = _s(parsed.get("description"))
-        if not description:
-            warnings.append("No description was generated.")
-    elif kind == "unknown":
+    category = _s(parsed.get("product_category"))
+    if category and available_categories and category not in available_categories:
+        # Claude returned a category not in the list — flag it and clear.
         warnings.append(
-            "Could not classify this product as dry good or live fish. "
-            "Tag it manually and re-enrich."
+            f"Suggested category '{category}' is not in your category list. "
+            f"Pick one manually."
         )
+        category = None
+
+    description = _s(parsed.get("description_html"))
+    if not description:
+        warnings.append("No description was generated.")
+
+    suggested_tags = parsed.get("suggested_tags") or []
+    if not isinstance(suggested_tags, list):
+        suggested_tags = []
+    suggested_tags = [str(t).strip().lower() for t in suggested_tags if t][:5]
 
     return EnrichmentResult(
         input_name=input_name,
+        cleaned_name=_s(parsed.get("cleaned_name")) or input_name,
         kind=kind,
-        description=description,
-        fish_profile=fish_profile,
-        detected_brand=_s(parsed.get("detected_brand")),
+        description_html=description,
+        product_category=category,
+        brand_name=_s(parsed.get("brand_name")),
+        suggested_tags=suggested_tags,
         warnings=warnings,
     )
