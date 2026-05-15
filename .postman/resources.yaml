@@ -1,13 +1,13 @@
 # Use this workspace to collaborate
 workspace:
-  id: 45d86d90-a2c0-4056-80a9-16e406a649f7
+  id: 4#
 
 # Each entry here maps a local resource to one or more corresponding objects in Postman Cloud
 
 cloudResources:
   collections:
-    ../postman/collections/Lightspeed X-Series: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
-    ../postman/collections/Lightspeed X-Series Bulk Product Categories: 93b3a8fb-57b6-4be0-b4ba-47a5d7fe114f
+    ../postman/collections/Lightspeed X-Series: #
+    ../postman/collections/Lightspeed X-Series Bulk Product Categories: #
 
 # All resources in the `postman/` folder are automatically registered in Local View.
 # Point to additional files outside the `postman/` folder to register them individually. Example:
