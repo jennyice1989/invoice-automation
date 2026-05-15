@@ -1,0 +1,39 @@
+$kind: http-request
+url: "{{baseUrl}}/products"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "{{product_name}}",
+      "sku": "{{sku}}",
+      "supplier_id": "{{supplier_id}}",
+      "supplier_code": "{{supplier_code}}",
+      "barcode": "{{barcode}}",
+      "supply_price": {{supply_price}},
+      "price_excluding_tax": {{retail_price}},
+      "description": "{{description}}"
+    }
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status 200 or 201", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 201]);
+      });
+      pm.test("Product created with an ID", function () {
+          const json = pm.response.json();
+          const product = json.data || json;
+          pm.expect(product).to.have.property("id");
+          pm.expect(product.name).to.be.a("string");
+      });
+      // Save product_id
+      const json = pm.response.json();
+      const product = json.data || json;
+      if (product && product.id) {
+          pm.collectionVariables.set("product_id", product.id);
+          console.log("product_id set to:", product.id);
+      }
+    language: text/javascript
+order: 4000

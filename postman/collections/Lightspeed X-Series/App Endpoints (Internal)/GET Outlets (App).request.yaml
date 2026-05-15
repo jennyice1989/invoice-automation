@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{appUrl}}/outlets"
+method: GET
+auth:
+  type: noauth
+order: 12000

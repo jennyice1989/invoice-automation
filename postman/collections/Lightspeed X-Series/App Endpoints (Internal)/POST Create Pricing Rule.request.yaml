@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{appUrl}}/pricing/rules"
+method: POST
+headers:
+  Content-Type: application/json
+auth:
+  type: noauth
+order: 8000

@@ -1,0 +1,26 @@
+$kind: http-request
+url: "{{baseUrl}}/outlets"
+method: GET
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status 200 OK", function () {
+          pm.response.to.have.status(200);
+      });
+      pm.test("Response has data array", function () {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("data");
+          pm.expect(json.data).to.be.an("array");
+      });
+      pm.test("At least one outlet returned", function () {
+          const json = pm.response.json();
+          pm.expect(json.data.length).to.be.above(0);
+      });
+      // Save first outlet_id for use in other requests
+      const outlets = pm.response.json().data;
+      if (outlets && outlets.length > 0) {
+          pm.collectionVariables.set("outlet_id", outlets[0].id);
+          console.log("outlet_id set to:", outlets[0].id);
+      }
+    language: text/javascript
+order: 100

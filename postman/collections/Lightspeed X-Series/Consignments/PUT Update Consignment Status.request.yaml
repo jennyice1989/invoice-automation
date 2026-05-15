@@ -1,0 +1,15 @@
+$kind: http-request
+url: "{{baseUrl}}/consignments/{{consignment_id}}"
+method: PUT
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "outlet_id": "{{outlet_id}}",
+      "name": "{{consignment_name}}",
+      "type": "SUPPLIER",
+      "status": "{{consignment_status}}"
+    }
+order: 3000

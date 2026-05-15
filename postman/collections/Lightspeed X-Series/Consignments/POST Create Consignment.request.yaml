@@ -1,0 +1,39 @@
+$kind: http-request
+url: "{{baseUrl}}/consignments"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "{{consignment_name}}",
+      "outlet_id": "{{outlet_id}}",
+      "type": "SUPPLIER",
+      "status": "OPEN",
+      "supplier_id": "{{supplier_id}}",
+      "supplier_invoice": "{{supplier_invoice_number}}",
+      "reference": "{{reference}}"
+    }
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status 200 or 201", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 201]);
+      });
+      pm.test("Consignment created with OPEN status", function () {
+          const json = pm.response.json();
+          const consignment = json.data || json;
+          pm.expect(consignment).to.have.property("id");
+          pm.expect(consignment.status).to.eql("OPEN");
+      });
+      // Save consignment_id for subsequent requests
+      const json = pm.response.json();
+      const consignment = json.data || json;
+      if (consignment && consignment.id) {
+          pm.collectionVariables.set("consignment_id", consignment.id);
+          pm.collectionVariables.set("consignment_name", consignment.name);
+          console.log("consignment_id set to:", consignment.id);
+      }
+    language: text/javascript
+order: 1000

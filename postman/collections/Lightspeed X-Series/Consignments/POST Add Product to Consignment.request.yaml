@@ -1,0 +1,15 @@
+$kind: http-request
+url: "{{baseUrl}}/consignments/{{consignment_id}}/products"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "product_id": "{{product_id}}",
+      "count": {{count}},
+      "cost": {{cost}},
+      "received": {{received}}
+    }
+order: 2000

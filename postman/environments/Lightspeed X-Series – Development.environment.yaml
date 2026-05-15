@@ -1,0 +1,12 @@
+name: Lightspeed X-Series – Development
+values:
+  - key: domain_prefix
+    value: yourstore
+  - key: personal_token
+    value: ''
+  - key: appUrl
+    value: 'http://localhost:8000'
+  - key: outlet_id
+    value: ''
+  - key: supplier_id
+    value: ''

@@ -1,0 +1,12 @@
+name: Lightspeed X-Series – Production
+values:
+  - key: domain_prefix
+    value: yourstore
+  - key: personal_token
+    value: ''
+  - key: appUrl
+    value: 'https://your-app.onrender.com'
+  - key: outlet_id
+    value: ''
+  - key: supplier_id
+    value: ''

@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{appUrl}}/consignments/{{consignment_id}}"
+method: GET
+auth:
+  type: noauth
+order: 14000

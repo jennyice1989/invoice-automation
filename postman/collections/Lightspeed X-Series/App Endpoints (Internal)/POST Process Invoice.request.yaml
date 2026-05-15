@@ -1,0 +1,32 @@
+$kind: http-request
+url: "{{appUrl}}/invoices/process"
+method: POST
+body:
+  type: formdata
+  content:
+    - type: file
+      key: file
+      src: ""
+auth:
+  type: noauth
+scripts:
+  - type: beforeRequest
+    code: |-
+      console.log("Uploading test invoice PDF...");
+    language: text/javascript
+  - type: afterResponse
+    code: |-
+      pm.test("Status is 200 or 202", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 202]);
+      });
+      pm.test("Response has invoice_id field", function () {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("invoice_id");
+      });
+      const json = pm.response.json();
+      if (json && json.invoice_id) {
+          pm.collectionVariables.set("invoice_id", json.invoice_id);
+          console.log("invoice_id set to:", json.invoice_id);
+      }
+    language: text/javascript
+order: 400
