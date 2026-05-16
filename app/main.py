@@ -237,12 +237,20 @@ async def list_categories_endpoint():
         raise HTTPException(502, str(exc)) from exc
     items = []
     for c in cats:
+        if not isinstance(c, dict):
+            logger.warning("Skipping non-dict category: %r", c)
+            continue
         if not c.get("leaf_category"):
             continue
         path = c.get("category_path") or []
-        if path:
-            full = " / ".join(p.get("name", "") for p in path if p.get("name"))
+        if isinstance(path, list):
+            full = " / ".join(
+                p.get("name", "") for p in path
+                if isinstance(p, dict) and p.get("name")
+            )
         else:
+            full = ""
+        if not full:
             full = c.get("name") or ""
         items.append({"id": c["id"], "name": c.get("name"), "full_name": full})
     items.sort(key=lambda x: x["full_name"].lower())
@@ -1089,12 +1097,18 @@ async def _enrich_pending_drafts(batch_id: str):
             # which already includes all ancestors. We only want leaves.
             leaf_names = []
             for c in cats:
+                if not isinstance(c, dict):
+                    continue
                 if not c.get("leaf_category"):
                     continue
                 path = c.get("category_path") or []
-                if path:
-                    full = " / ".join(p.get("name", "") for p in path if p.get("name"))
-                    leaf_names.append(full)
+                if isinstance(path, list) and path:
+                    full = " / ".join(
+                        p.get("name", "") for p in path
+                        if isinstance(p, dict) and p.get("name")
+                    )
+                    if full:
+                        leaf_names.append(full)
                 elif c.get("name"):
                     leaf_names.append(c["name"])
             category_names = sorted(set(leaf_names))
@@ -1328,11 +1342,16 @@ async def create_from_draft(
         try:
             cats = await client.list_categories()
             for c in cats:
+                if not isinstance(c, dict):
+                    continue
                 if not c.get("leaf_category"):
                     continue
                 path = c.get("category_path") or []
-                if path:
-                    full = " / ".join(p.get("name", "") for p in path if p.get("name"))
+                if isinstance(path, list) and path:
+                    full = " / ".join(
+                        p.get("name", "") for p in path
+                        if isinstance(p, dict) and p.get("name")
+                    )
                 else:
                     full = c.get("name") or ""
                 if full == draft.product_category:
@@ -1367,8 +1386,18 @@ async def create_from_draft(
             category_id=category_id,
         )
     except LightspeedError as exc:
+        # Surface the full Lightspeed error message — it usually
+        # explains WHICH field was rejected (e.g. category_id format).
         draft.error = str(exc)
+        logger.warning("create_product failed for draft %s: %s", draft.id, exc)
         raise HTTPException(502, f"Lightspeed create failed: {exc}")
+    except Exception as exc:
+        # Catch absolutely anything else (response parsing, attribute errors)
+        # and turn it into a 502 with a useful message, instead of a generic
+        # "Internal Server Error".
+        draft.error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Unexpected error creating draft %s", draft.id)
+        raise HTTPException(502, f"Create failed: {type(exc).__name__}: {exc}")
 
     # Defensive: some Lightspeed endpoints wrap the product in a list.
     # create_product is supposed to unwrap, but if a future change forgets,

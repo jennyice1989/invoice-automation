@@ -200,11 +200,32 @@ class LightspeedClient:
 
     async def list_categories(self, *, page_size: int = 500) -> list[dict]:
         """Return all product categories. X-Series supports hierarchy via
-        parent_id; categories are returned flat with parent references."""
+        category_path; categories are returned flat with parent references.
+
+        Defensive against unexpected response shapes — logs and skips
+        non-dict items rather than crashing the caller.
+        """
         data = await self._request(
             "GET", "/product_categories", params={"page_size": page_size}
         )
-        return data.get("data", [])
+        raw = data.get("data", [])
+        if not isinstance(raw, list):
+            logger.warning(
+                "Unexpected /product_categories shape: data is %s, not list. "
+                "Full response keys: %s",
+                type(raw).__name__, list(data.keys()) if isinstance(data, dict) else "n/a",
+            )
+            return []
+        result = []
+        for item in raw:
+            if isinstance(item, dict):
+                result.append(item)
+            else:
+                logger.warning(
+                    "Skipping non-dict category item: %r (type %s)",
+                    item, type(item).__name__,
+                )
+        return result
 
     async def list_brands(self, *, page_size: int = 500) -> list[dict]:
         """Return all brands."""
@@ -452,10 +473,8 @@ class LightspeedClient:
         if brand_id:
             payload["brand_id"] = brand_id
         if category_id:
-            # X-Series field name has varied with API revisions; send both
-            # so whichever is current is honored, the other ignored.
+            # X-Series 2.0 uses product_category_id
             payload["product_category_id"] = category_id
-            payload["category_id"] = category_id
         if tag_ids:
             payload["tag_ids"] = tag_ids
 
