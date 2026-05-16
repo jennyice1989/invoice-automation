@@ -85,8 +85,156 @@ def _normalize(s: str | None) -> str:
     return s
 
 
+# Common brand names that appear in this catalog and invoices.
+# Aliases (left side) map to a canonical brand (right side) so that
+# "Seachem", "seachem labs", "Seachem Laboratories" all collapse to "seachem".
+# Order matters — longer aliases checked first.
+_BRAND_ALIASES = {
+    # Aquariums / livestock
+    "aqua zone aquariums": "a2z",
+    "a2z": "a2z",
+    # Big aquatic brands
+    "seachem laboratories": "seachem",
+    "seachem labs": "seachem",
+    "seachem aquavitro": "seachem",
+    "aquavitro": "seachem",
+    "seachem": "seachem",
+    "carib sea": "caribsea",
+    "caribsea": "caribsea",
+    "hikari usa": "hikari",
+    "hikari": "hikari",
+    "fritz aquatics": "fritz",
+    "fritz": "fritz",
+    "api ": "api",  # trailing space — "api" alone matches too many things
+    "aquarium pharmaceuticals": "api",
+    "fluval": "fluval",
+    "tetra": "tetra",
+    "aqueon": "aqueon",
+    "marina": "marina",
+    "lees aquarium": "lees",
+    "lee s aquarium": "lees",
+    "lee's aquarium": "lees",
+    "ocean nutrition": "ocean nutrition",
+    "reef nutrition": "reef nutrition",
+    "red sea": "red sea",
+    "sicce": "sicce",
+    "sera": "sera",
+    "aquatop": "aquatop",
+    "python": "python",
+    "eshopps": "eshopps",
+    "flipper": "flipper",
+    "novus": "novus",
+    "poly filter": "polyfilter",
+    "polyfilter": "polyfilter",
+    "polybio marine": "polyfilter",
+    "lifegard": "lifegard",
+    # Reptile/livestock
+    "zoo med": "zoomed",
+    "zoomed": "zoomed",
+    "zml": "zoomed",
+    "exo terra": "exoterra",
+    "exoterra": "exoterra",
+    "komodo": "komodo",
+    "oxbow": "oxbow",
+    # Plumbing
+    "duraplas": "dura",
+    "dura plastics": "dura",
+    "spears": "spears",
+    "nds": "nds",
+    "reefh2o": "reefh2o",
+    "reef h2o": "reefh2o",
+    "jbj": "jbj",
+    "xp aqua": "xpaqua",
+    "xpaqua": "xpaqua",
+    "current usa": "current",
+    "current": "current",
+}
+
+
+def _detect_brand(text: str | None) -> str | None:
+    """Find the first brand alias that appears in the text. Returns
+    the canonical brand key, or None. Case-insensitive."""
+    if not text:
+        return None
+    t = " " + text.lower() + " "
+    # Sort by alias length descending so 'seachem aquavitro' wins over 'seachem'
+    for alias in sorted(_BRAND_ALIASES, key=len, reverse=True):
+        # Match alias as a whole-word substring
+        needle = " " + alias.lower().rstrip() + " "
+        if needle in t:
+            return _BRAND_ALIASES[alias]
+        # Also match at start (no leading space possible)
+        if t.lstrip().startswith(alias.lower()):
+            return _BRAND_ALIASES[alias]
+    return None
+
+
+# Stopwords removed before token-set similarity. These are size/qualifier
+# words that match everywhere and add noise. "ml", "oz", "lb" etc. ARE
+# kept because the *number* before them carries information.
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "for", "with", "of", "in",
+    "to", "by", "on", "at", "from", "pack", "size", "new",
+    "free", "freight",  # invoice cruft
+}
+
+
+def _tokens(text: str | None) -> set[str]:
+    """Return the set of meaningful tokens in text after normalization."""
+    norm = _normalize(text)
+    if not norm:
+        return set()
+    return {t for t in norm.split() if t and t not in _STOPWORDS and len(t) > 1}
+
+
+def _token_set_ratio(a: str, b: str) -> float:
+    """Jaccard-style token overlap, with a bonus for shared tokens that
+    are numbers/sizes (which carry stronger signal than common words)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    intersection = ta & tb
+    union = ta | tb
+    if not union:
+        return 0.0
+    base = len(intersection) / len(union)
+    # Bonus: shared tokens that contain digits (like '500ml', '40lbs',
+    # 'p55', '3in') are stronger signal than shared words. Add 0.05
+    # per shared numeric token, up to +0.20.
+    numeric_shared = sum(1 for t in intersection if any(c.isdigit() for c in t))
+    return min(1.0, base + min(0.20, 0.05 * numeric_shared))
+
+
 def _name_similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+    """Hybrid similarity — max of token-set overlap and char-level
+    ratio. Token-set catches reorderings and partial-word matches
+    that the char-level SequenceMatcher misses; char-level still
+    helps when one side is a tighter spelling of the other."""
+    ts = _token_set_ratio(a, b)
+    cs = SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+    return max(ts, cs)
+
+
+def _trailing_digits(s: str | None) -> list[str]:
+    """Return candidate digit strings from a supplier code, for fuzzy
+    cross-distributor matching. Different distributors use different
+    alphabetic prefixes and zero-padding for the same physical product:
+      ReefH2O 'SC07076'   -> ['07076', '7076']
+      Seachem 'ASM7076'   -> ['7076']
+      Plain   '7076'      -> ['7076']
+    Returns a list (longest first) so the caller can try each.
+    """
+    if not s:
+        return []
+    m = re.search(r"(\d+)$", s.strip())
+    if not m:
+        return []
+    digits = m.group(1)
+    candidates = [digits]
+    stripped = digits.lstrip("0")
+    if stripped and stripped != digits and len(stripped) >= 3:
+        candidates.append(stripped)
+    return candidates
 
 
 class MatchingService:
@@ -181,32 +329,106 @@ class MatchingService:
                     confidence=1.0,
                 )
 
-        # Tier 3: fuzzy name match against supplier's catalog (last resort)
+        # Tier 2.5: exact supplier_code match within the supplier's
+        # product list (we already fetched it). This is the typical case
+        # for distributors like ReefH2O whose catalog codes don't appear
+        # as SKUs/barcodes anywhere — but they ARE stored on the
+        # Lightspeed product's `supplier_code` field. Case- and
+        # whitespace-insensitive.
+        if line.supplier_code and supplier_products:
+            target = line.supplier_code.strip().lower()
+            for p in supplier_products:
+                p_code = (p.get("supplier_code") or "").strip().lower()
+                if p_code and p_code == target:
+                    return MatchedLine(
+                        raw=line,
+                        product_id=p["id"],
+                        product_sku=p.get("sku"),
+                        product_name=p.get("name"),
+                        matched_by="supplier_code",
+                        confidence=1.0,
+                    )
+
+        # Tier 3: fuzzy name match against supplier's catalog (last resort).
+        # We score by name similarity, then BOOST when the supplier_code's
+        # numeric tail also appears in the product (in name, sku, or
+        # supplier_code). Different distributors use different prefixes
+        # (SC07076 vs ASM7076 vs simply 7076), but the digits usually
+        # carry the actual model number.
         if line.description and supplier_products:
-            scored = sorted(
-                (
-                    (_name_similarity(line.description, p.get("name", "")), p)
-                    for p in supplier_products
-                ),
-                key=lambda x: x[0],
-                reverse=True,
+            code_digits = _trailing_digits(line.supplier_code)
+            line_brand = _detect_brand(line.description)
+            scored = []
+            for p in supplier_products:
+                product_name = p.get("name", "") or ""
+                product_brand = _detect_brand(
+                    " ".join([
+                        product_name,
+                        p.get("brand_name", "") or "",
+                    ])
+                )
+
+                sim = _name_similarity(line.description, product_name)
+
+                # Brand-aware adjustment:
+                # - If we detected a brand on the invoice line AND the
+                #   product has the same brand, +0.10.
+                # - If brands are BOTH known but DIFFERENT, heavily penalize
+                #   (these are almost certainly the wrong product even if
+                #   the names happen to share characters).
+                # - If either brand is unknown, no adjustment — let
+                #   similarity speak for itself.
+                brand_adj = 0.0
+                if line_brand and product_brand:
+                    if line_brand == product_brand:
+                        brand_adj = 0.10
+                    else:
+                        brand_adj = -0.35
+
+                # Digit-tail boost — see _trailing_digits docs
+                boost = 0.0
+                digits_matched = False
+                if code_digits:
+                    haystack = " ".join([
+                        product_name,
+                        p.get("sku", "") or "",
+                        p.get("supplier_code", "") or "",
+                    ]).lower()
+                    for digit_form in code_digits:
+                        if len(digit_form) >= 4 and digit_form in haystack:
+                            boost = 0.25
+                            digits_matched = True
+                            break
+
+                total = max(0.0, sim + brand_adj + boost)
+                scored.append((total, sim, boost, digits_matched, p))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_total, top_sim, top_boost, top_digits, top_product = scored[0]
+
+            # Auto-match rules — designed to avoid false matches:
+            #   - Confident only if digit-boost fires (cross-distributor signal)
+            #   - OR name similarity is very high (0.80+) on its own
+            # Plain "the name kind of looks similar" (0.60-0.79) stays uncertain.
+            should_auto_match = (
+                (top_digits and top_total >= FUZZY_MATCH_THRESHOLD)
+                or top_sim >= 0.80
             )
-            top_score, top_product = scored[0]
-            if top_score >= FUZZY_MATCH_THRESHOLD:
+            if should_auto_match:
                 return MatchedLine(
                     raw=line,
                     product_id=top_product["id"],
                     product_sku=top_product.get("sku"),
                     product_name=top_product.get("name"),
-                    matched_by="fuzzy_name",
-                    confidence=top_score,
+                    matched_by="fuzzy_name+digits" if top_digits else "fuzzy_name",
+                    confidence=top_total,
                 )
             candidates = [
                 {
                     "product_id": p["id"], "sku": p.get("sku"),
-                    "name": p.get("name"), "confidence": round(score, 3),
+                    "name": p.get("name"), "confidence": round(total, 3),
                 }
-                for score, p in scored[:3]
+                for total, _, _, _, p in scored[:3]
             ]
             return UnmatchedLine(
                 raw=line, candidates=candidates,
