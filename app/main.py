@@ -1370,6 +1370,17 @@ async def create_from_draft(
         draft.error = str(exc)
         raise HTTPException(502, f"Lightspeed create failed: {exc}")
 
+    # Defensive: some Lightspeed endpoints wrap the product in a list.
+    # create_product is supposed to unwrap, but if a future change forgets,
+    # surface a useful error rather than crashing with AttributeError.
+    if isinstance(created, list):
+        created = created[0] if created else {}
+    if not isinstance(created, dict):
+        draft.error = f"Unexpected response from Lightspeed: {type(created).__name__}"
+        raise HTTPException(
+            502, f"Unexpected Lightspeed response (got {type(created).__name__})"
+        )
+
     new_id = created.get("id")
     if not new_id:
         draft.error = "create_product returned no id"

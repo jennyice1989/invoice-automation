@@ -460,7 +460,17 @@ class LightspeedClient:
             payload["tag_ids"] = tag_ids
 
         data = await self._request("POST", "/products", json=payload)
-        return data.get("data", data)
+        # POST /products returns {"data": [ {...product...} ]} — a list
+        # of one. Other endpoints return data as a dict, so this helper
+        # has to handle both.
+        inner = data.get("data", data)
+        if isinstance(inner, list):
+            if not inner:
+                raise LightspeedError(
+                    "Lightspeed returned empty data on product create"
+                )
+            return inner[0]
+        return inner
 
     async def update_product(
         self,
