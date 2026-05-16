@@ -955,19 +955,36 @@ async def export_csv(
 
 @app.get("/products/search", dependencies=[Depends(require_auth)])
 async def search_products(q: str):
-    """Search products by name (for manual selection in the review UI)."""
+    """Search products by name (for manual selection in the review UI).
+
+    Uses the X-Series /search endpoint with type=products. The /products
+    list endpoint does NOT honor `search` as a query parameter — it
+    silently ignores it and returns the default product listing, which
+    is why every query was returning the same results.
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"data": []}
     try:
-        # X-Series supports `?search=` on /products
         data = await _client()._request(
-            "GET", "/products",
-            params={"search": q, "page_size": 20},
+            "GET", "/search",
+            params={"type": "products", "query": q, "page_size": 20},
         )
     except LightspeedError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return {"data": [{
-        "id": p["id"], "name": p.get("name"), "sku": p.get("sku"),
-        "supply_price": p.get("supply_price"),
-    } for p in data.get("data", [])]}
+    items = []
+    for p in data.get("data", []):
+        # Filter out deleted/inactive products — they show up in search
+        # but can't be used (PUT against them returns 404).
+        if p.get("deleted_at"):
+            continue
+        if p.get("active") is False:
+            continue
+        items.append({
+            "id": p["id"], "name": p.get("name"), "sku": p.get("sku"),
+            "supply_price": p.get("supply_price"),
+        })
+    return {"data": items}
 
 
 # --------------------------------------------------------------------- #
