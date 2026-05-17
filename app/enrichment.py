@@ -71,16 +71,18 @@ FORMAT (mandatory):
 - HTML using <h3>, <p>, <strong>, and <em> tags only
 - Open with a single <h3> heading: "<Product Name> – <Hook>"
 - Then 2-3 <p> paragraphs
-- Total length: 400-700 characters of visible text (not counting HTML)
+- Total length: 300-550 characters of visible text (not counting HTML)
 - End with brand attribution: "Available at <strong>A2Z Aquariums</strong>"
 
 TONE:
-- Confident and informative, never generic
+- Confident, specific, and plainspoken; no salesy filler
 - NEVER use these clichés: "transform your aquarium", "elevate your",
   "underwater paradise", "hand-selected", "must-have", "whether you're
   a seasoned aquarist or just starting", "captivating", "mesmerizing"
 - DO mention specific facts: dimensions, capacity, materials, species
   characteristics, care needs, brand reputation
+- If a fact is not knowable from the product name, avoid making it up.
+  Prefer concrete product-type context over invented specs.
 - For dry goods: explain what it is, what it does, who it's for, and
   one specific detail (dosing, compatibility, capacity, etc.)
 - For live fish/inverts/corals/plants: weave care info into the prose
@@ -120,7 +122,9 @@ saltwater, planted tanks, and reef systems.</p>
 def _build_prompt(
     product_name: str,
     supplier_name: str | None,
+    supplier_code: str | None,
     barcode: str | None,
+    supply_price: float | None,
     kind_hint: ProductKind | None,
     available_categories: list[str],
     available_brands: list[str],
@@ -131,8 +135,12 @@ def _build_prompt(
     extra = []
     if supplier_name:
         extra.append(f"Supplier: {supplier_name}")
+    if supplier_code:
+        extra.append(f"Supplier item code: {supplier_code}")
     if barcode:
         extra.append(f"Barcode/UPC: {barcode}")
+    if supply_price is not None:
+        extra.append(f"Wholesale cost: ${supply_price:.2f}")
     if kind_hint and kind_hint != "unknown":
         extra.append(f"Product type (already classified): {kind_hint}")
     extras = ("\n" + "\n".join(extra)) if extra else ""
@@ -187,7 +195,9 @@ async def enrich_product(
     product_name: str,
     *,
     supplier_name: str | None = None,
+    supplier_code: str | None = None,
     barcode: str | None = None,
+    supply_price: float | None = None,
     kind_hint: ProductKind | None = None,
     available_categories: list[str] | None = None,
     available_brands: list[str] | None = None,
@@ -201,7 +211,9 @@ async def enrich_product(
     prompt = _build_prompt(
         product_name=product_name.strip(),
         supplier_name=supplier_name,
+        supplier_code=supplier_code,
         barcode=barcode,
+        supply_price=supply_price,
         kind_hint=kind_hint,
         available_categories=available_categories or [],
         available_brands=available_brands or [],
@@ -254,7 +266,9 @@ async def enrich_batch(
             r = await enrich_product(
                 p["name"],
                 supplier_name=p.get("supplier_name"),
+                supplier_code=p.get("supplier_code"),
                 barcode=p.get("barcode"),
+                supply_price=p.get("supply_price"),
                 kind_hint=p.get("kind_hint"),
                 available_categories=available_categories,
                 available_brands=available_brands,

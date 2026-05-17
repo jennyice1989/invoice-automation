@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -30,6 +31,49 @@ def _is_live_product(product: dict) -> bool:
     if product.get("active") is False:
         return False
     return True
+
+
+def _norm_search(s: str | None) -> str:
+    if not s:
+        return ""
+    return " ".join(str(s).lower().replace("-", " ").split())
+
+
+def _product_search_score(query: str, product: dict) -> float:
+    """Score a catalog product for manual search.
+
+    Lightspeed's /search endpoint is not reliable for free-text product
+    lookup here, so the app ranks a fully fetched catalog locally.
+    """
+    q = _norm_search(query)
+    if not q:
+        return 0.0
+
+    fields = [
+        _norm_search(product.get("name")),
+        _norm_search(product.get("sku")),
+        _norm_search(product.get("supplier_code")),
+        _norm_search(product.get("barcode")),
+    ]
+    best = 0.0
+    q_tokens = set(q.split())
+    for field in fields:
+        if not field:
+            continue
+        if field == q:
+            best = max(best, 1.0)
+        elif q in field:
+            best = max(best, 0.92)
+        elif field in q:
+            best = max(best, 0.86)
+
+        f_tokens = set(field.split())
+        if q_tokens and f_tokens:
+            best = max(best, len(q_tokens & f_tokens) / len(q_tokens | f_tokens))
+
+        best = max(best, SequenceMatcher(None, q, field).ratio())
+
+    return best
 
 
 class LightspeedError(Exception):
@@ -239,6 +283,68 @@ class LightspeedClient:
             "GET", "/tags", params={"page_size": page_size}
         )
         return data.get("data", [])
+
+    async def list_products(
+        self,
+        *,
+        supplier_id: str | None = None,
+        page_size: int = 500,
+        max_pages: int = 200,
+    ) -> list[dict]:
+        """Return the full live product catalog, walking pagination.
+
+        X-Series list endpoints silently return a page when no paging is
+        provided. Matching against just that first page made invoice lines
+        look unrelated to the catalog, so callers that need catalog-wide
+        matching should use this helper.
+        """
+        products: list[dict] = []
+        seen_ids: set[str] = set()
+        for page in range(1, max_pages + 1):
+            params: dict[str, Any] = {"page_size": page_size, "page": page}
+            if supplier_id:
+                params["supplier_id"] = supplier_id
+            data = await self._request("GET", "/products", params=params)
+            raw_items = data.get("data", [])
+            if not isinstance(raw_items, list) or not raw_items:
+                break
+
+            added = 0
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                product_id = item.get("id")
+                if product_id and product_id in seen_ids:
+                    continue
+                if product_id:
+                    seen_ids.add(product_id)
+                if _is_live_product(item):
+                    products.append(item)
+                    added += 1
+
+            if len(raw_items) < page_size or added == 0:
+                break
+
+        return products
+
+    async def search_products(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Search products locally across the full live catalog."""
+        query = (query or "").strip()
+        if not query:
+            return []
+        products = await self.list_products()
+        scored = [
+            (_product_search_score(query, product), product)
+            for product in products
+        ]
+        scored = [(score, product) for score, product in scored if score >= 0.25]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [product for _, product in scored[:limit]]
 
     async def search_suppliers(self, query: str) -> list[dict]:
         """Substring search over supplier names. Case- and space-insensitive.

@@ -249,16 +249,17 @@ class MatchingService:
         supplier_id: str,
         lines: list[RawInvoiceLine],
     ) -> MatchResult:
-        # Pull the supplier's product catalog once for fuzzy matching.
-        # This is the expensive call — better to do it once and reuse.
-        supplier_products = await self._load_supplier_products(supplier_id)
+        # Pull the full catalog once for exact supplier-code and fuzzy
+        # matching. A supplier-filtered first page missed most real products
+        # in Lightspeed, which made invoice lines look unrelated.
+        catalog_products = await self._load_catalog_products()
 
         matched: list[MatchedLine] = []
         unmatched: list[UnmatchedLine] = []
 
         for line in lines:
             result = await self._match_one(
-                supplier_id, line, supplier_products
+                supplier_id, line, catalog_products
             )
             if isinstance(result, MatchedLine):
                 matched.append(result)
@@ -271,7 +272,7 @@ class MatchingService:
         self,
         supplier_id: str,
         line: RawInvoiceLine,
-        supplier_products: list[dict],
+        catalog_products: list[dict],
     ) -> MatchedLine | UnmatchedLine:
         # Tier 1: saved mapping (highest signal — human approved this before)
         # Keyed on supplier_code OR barcode, whichever extraction gave us.
@@ -329,15 +330,15 @@ class MatchingService:
                     confidence=1.0,
                 )
 
-        # Tier 2.5: exact supplier_code match within the supplier's
-        # product list (we already fetched it). This is the typical case
+        # Tier 2.5: exact supplier_code match within the full catalog
+        # (we already fetched it). This is the typical case
         # for distributors like ReefH2O whose catalog codes don't appear
         # as SKUs/barcodes anywhere — but they ARE stored on the
         # Lightspeed product's `supplier_code` field. Case- and
         # whitespace-insensitive.
-        if line.supplier_code and supplier_products:
+        if line.supplier_code and catalog_products:
             target = line.supplier_code.strip().lower()
-            for p in supplier_products:
+            for p in catalog_products:
                 p_code = (p.get("supplier_code") or "").strip().lower()
                 if p_code and p_code == target:
                     return MatchedLine(
@@ -349,17 +350,17 @@ class MatchingService:
                         confidence=1.0,
                     )
 
-        # Tier 3: fuzzy name match against supplier's catalog (last resort).
+        # Tier 3: fuzzy name match against the full catalog (last resort).
         # We score by name similarity, then BOOST when the supplier_code's
         # numeric tail also appears in the product (in name, sku, or
         # supplier_code). Different distributors use different prefixes
         # (SC07076 vs ASM7076 vs simply 7076), but the digits usually
         # carry the actual model number.
-        if line.description and supplier_products:
+        if line.description and catalog_products:
             code_digits = _trailing_digits(line.supplier_code)
             line_brand = _detect_brand(line.description)
             scored = []
-            for p in supplier_products:
+            for p in catalog_products:
                 product_name = p.get("name", "") or ""
                 product_brand = _detect_brand(
                     " ".join([
@@ -440,17 +441,10 @@ class MatchingService:
             reason="No matching code, barcode, or description found",
         )
 
-    async def _load_supplier_products(self, supplier_id: str) -> list[dict]:
-        """Fetch all products for a given supplier. For typical suppliers
-        this is a few dozen to a few hundred — fine to load and cache in
-        memory per request."""
+    async def _load_catalog_products(self) -> list[dict]:
+        """Fetch all live products for matching."""
         try:
-            data = await self.ls._request(
-                "GET",
-                "/products",
-                params={"supplier_id": supplier_id, "page_size": 500},
-            )
+            return await self.ls.list_products()
         except LightspeedError as exc:
-            logger.warning("Failed to load supplier products: %s", exc)
+            logger.warning("Failed to load product catalog: %s", exc)
             return []
-        return data.get("data", [])

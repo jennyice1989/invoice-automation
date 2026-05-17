@@ -965,29 +965,19 @@ async def export_csv(
 async def search_products(q: str):
     """Search products by name (for manual selection in the review UI).
 
-    Uses the X-Series /search endpoint with type=products. The /products
-    list endpoint does NOT honor `search` as a query parameter — it
-    silently ignores it and returns the default product listing, which
-    is why every query was returning the same results.
+    Walks the full Lightspeed catalog and ranks locally. The Lightspeed
+    /search endpoint did not reliably apply free-text product queries for
+    this app, so every query could return the same unrelated page.
     """
     q = (q or "").strip()
     if not q:
         return {"data": []}
     try:
-        data = await _client()._request(
-            "GET", "/search",
-            params={"type": "products", "query": q, "page_size": 20},
-        )
+        products = await _client().search_products(q, limit=20)
     except LightspeedError as exc:
         raise HTTPException(502, str(exc)) from exc
     items = []
-    for p in data.get("data", []):
-        # Filter out deleted/inactive products — they show up in search
-        # but can't be used (PUT against them returns 404).
-        if p.get("deleted_at"):
-            continue
-        if p.get("active") is False:
-            continue
+    for p in products:
         items.append({
             "id": p["id"], "name": p.get("name"), "sku": p.get("sku"),
             "supply_price": p.get("supply_price"),
@@ -1134,7 +1124,9 @@ async def _enrich_pending_drafts(batch_id: str):
             try:
                 result = await enrich_product(
                     name,
+                    supplier_code=draft.supplier_code,
                     barcode=draft.barcode,
+                    supply_price=draft.supply_price,
                     kind_hint=kind_hint,
                     available_categories=category_names,
                     available_brands=brand_names,
@@ -1423,6 +1415,44 @@ async def create_from_draft(
 
     # Add to source consignment if there is one
     added_to_consignment = False
+    if (
+        not draft.source_consignment_id
+        and draft.source_invoice_id
+        and draft.source_quantity
+    ):
+        invoice = (await session.execute(
+            select(Invoice).where(Invoice.id == draft.source_invoice_id)
+        )).scalar_one_or_none()
+        if invoice:
+            if invoice.consignment_id:
+                draft.source_consignment_id = invoice.consignment_id
+            elif invoice.supplier_invoice_number:
+                outlet_id = DEFAULT_OUTLET_ID
+                if not outlet_id:
+                    outlets = await client.list_outlets()
+                    if outlets:
+                        outlet_id = outlets[0]["id"]
+                if outlet_id:
+                    try:
+                        consignment = await client.create_consignment(
+                            name=f"Invoice {invoice.supplier_invoice_number}",
+                            outlet_id=outlet_id,
+                            supplier_id=invoice.supplier_id,
+                            supplier_invoice=invoice.supplier_invoice_number,
+                        )
+                        draft.source_consignment_id = consignment.get("id")
+                        invoice.consignment_id = draft.source_consignment_id
+                        if invoice.status == "AWAITING_ENRICHMENT":
+                            invoice.status = "IMPORTED_PARTIAL"
+                    except LightspeedError as exc:
+                        warns = (draft.warnings or {}).get("list", [])
+                        warns.append(
+                            f"Created the product, but failed to create a "
+                            f"consignment for invoice {invoice.supplier_invoice_number}: "
+                            f"{exc}. Add it manually in Lightspeed."
+                        )
+                        draft.warnings = {"list": warns}
+
     if draft.source_consignment_id and draft.source_quantity:
         try:
             from app.lightspeed import MatchedLineItem

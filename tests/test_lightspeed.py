@@ -142,6 +142,52 @@ async def test_auth_error_raises(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_list_products_walks_all_pages(client_factory):
+    seen_pages: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        seen_pages.append(page)
+        if page == "1":
+            return httpx.Response(200, json={"data": [
+                {"id": "p1", "name": "First", "active": True},
+                {"id": "p2", "name": "Second", "active": True},
+            ]})
+        if page == "2":
+            return httpx.Response(200, json={"data": [
+                {"id": "p3", "name": "Third", "active": True},
+            ]})
+        return httpx.Response(200, json={"data": []})
+
+    client = client_factory(handler)
+    products = await client.list_products(page_size=2)
+
+    assert [p["id"] for p in products] == ["p1", "p2", "p3"]
+    assert seen_pages == ["1", "2"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_search_products_ranks_full_catalog_locally(client_factory):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "wrong", "name": "Clown Tang Small/Medium", "sku": "11042"},
+            {
+                "id": "right",
+                "name": "Seachem Shrimp Accessories - Tube ASM7078",
+                "sku": "000116070782",
+                "supplier_code": "SC07078",
+            },
+        ]})
+
+    client = client_factory(handler)
+    products = await client.search_products("Seachem Aquavitro Shrimp Tube")
+
+    assert products[0]["id"] == "right"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_import_invoice_full_receive_flow(client_factory):
     """End-to-end: create -> add items -> dispatched -> received."""
     calls: list[tuple[str, str]] = []
