@@ -55,10 +55,30 @@ def _norm_supplier_name(s: str | None) -> str:
         token for token in text.split()
         if token not in {
             "inc", "incorporated", "llc", "ltd", "co", "company", "corp",
-            "corporation",
+            "corporation", "distribution", "distributors", "distributor",
         }
     ]
     return " ".join(tokens)
+
+
+def _compact_supplier_name(s: str | None) -> str:
+    return _norm_supplier_name(s).replace(" ", "")
+
+
+def _supplier_names_match(a: str | None, b: str | None) -> bool:
+    left = _norm_supplier_name(a)
+    right = _norm_supplier_name(b)
+    if not left or not right:
+        return False
+    if left == right or left in right or right in left:
+        return True
+    compact_left = left.replace(" ", "")
+    compact_right = right.replace(" ", "")
+    return (
+        compact_left == compact_right
+        or compact_left in compact_right
+        or compact_right in compact_left
+    )
 
 
 def _product_search_score(query: str, product: dict) -> float:
@@ -429,8 +449,7 @@ class LightspeedClient:
         suppliers = await self.list_suppliers()
         return [
             s for s in suppliers
-            if normalized in _norm_supplier_name(s.get("name"))
-            or _norm_supplier_name(s.get("name")) in normalized
+            if _supplier_names_match(normalized, s.get("name"))
         ]
 
     async def find_supplier_by_name(self, name: str) -> dict | None:
@@ -440,7 +459,7 @@ class LightspeedClient:
         """
         needle = _norm_supplier_name(name)
         for supplier in await self.list_suppliers():
-            if _norm_supplier_name(supplier.get("name")) == needle:
+            if _supplier_names_match(needle, supplier.get("name")):
                 return supplier
         return None
 

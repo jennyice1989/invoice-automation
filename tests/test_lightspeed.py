@@ -209,6 +209,21 @@ async def test_find_supplier_by_name_normalizes_punctuation_and_suffix(client_fa
 
 
 @pytest.mark.asyncio
+async def test_find_supplier_by_name_matches_compact_distribution_alias(client_factory):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "wrong", "name": "Reef Chowda"},
+            {"id": "right", "name": "Reef H2O Distribution"},
+        ]})
+
+    client = client_factory(handler)
+    supplier = await client.find_supplier_by_name("ReefH2O")
+
+    assert supplier["id"] == "right"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_search_products_ranks_full_catalog_locally(client_factory):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [
