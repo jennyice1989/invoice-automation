@@ -28,6 +28,7 @@ from app.auth import (
 )
 from app.catalog import (
     catalog_status,
+    find_cached_product_by_id,
     remember_supplier_item,
     search_cached_products,
     sync_lightspeed_catalog,
@@ -47,6 +48,7 @@ from app.lightspeed import (
     LightspeedNotFoundError, MatchedLineItem,
 )
 from app.matching import MatchingService, RawInvoiceLine
+from app.price_updates import float_or_none, retail_update_decision
 from app.pricing import PricingResult, price_line
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
@@ -690,10 +692,64 @@ async def finalize_invoice(
     items_for_lightspeed: list[MatchedLineItem] = []
     products_created: list[dict] = []
     products_updated: list[dict] = []
+    retail_price_report: list[dict] = []
     skipped: list[dict] = []
     errors: list[str] = []
     queued_for_enrichment: list[dict] = []
     enrichment_batch_id: str | None = None
+    product_cache: dict[str, dict] = {}
+
+    async def _get_existing_product(product_id: str | None) -> dict | None:
+        if not product_id:
+            return None
+        if product_id in product_cache:
+            return product_cache[product_id]
+        product = await find_cached_product_by_id(session, product_id)
+        try:
+            live_product = await client.get_product(product_id)
+            if live_product:
+                product = live_product
+        except LightspeedError as exc:
+            logger.warning(
+                "Could not fetch product %s before price update: %s",
+                product_id, exc,
+            )
+        if product:
+            product_cache[product_id] = product
+        return product
+
+    def _existing_retail(product: dict | None) -> float | None:
+        if not product:
+            return None
+        return float_or_none(
+            product.get("price_excluding_tax")
+            if product.get("price_excluding_tax") is not None
+            else product.get("retail_price")
+        )
+
+    def _report_retail_decision(
+        *,
+        product_id: str | None,
+        name: str | None,
+        sku: str | None,
+        supplier_code: str | None,
+        description: str | None,
+        existing_price,
+        suggested_price,
+        changed: bool,
+        reason: str,
+    ):
+        retail_price_report.append({
+            "product_id": product_id,
+            "name": name,
+            "sku": sku,
+            "supplier_code": supplier_code,
+            "description": description,
+            "existing_retail_price": float_or_none(existing_price),
+            "suggested_retail_price": float_or_none(suggested_price),
+            "changed": changed,
+            "reason": reason,
+        })
 
     # 1. Matched lines: optionally update existing product costs, queue for consignment
     for idx, m in enumerate(matched):
@@ -702,8 +758,14 @@ async def finalize_invoice(
                 retail = body.matched_overrides.get(str(idx)) \
                     or body.matched_overrides.get(idx) \
                     or m.get("suggested_retail_price")
+                product = await _get_existing_product(m.get("product_id"))
+                existing_retail = _existing_retail(product)
+                should_update_retail, retail_reason = retail_update_decision(
+                    existing_retail,
+                    retail,
+                )
                 upd = {}
-                if retail is not None:
+                if should_update_retail:
                     upd["retail_price"] = float(retail)
                 upd["supply_price"] = float(m["unit_cost"])
                 result = await client.update_product(m["product_id"], **upd)
@@ -714,11 +776,25 @@ async def finalize_invoice(
                         f"(product may be archived); consignment will still include it."
                     )
                 else:
+                    product_cache[m["product_id"]] = result
+                    _report_retail_decision(
+                        product_id=m.get("product_id"),
+                        name=m.get("product_name"),
+                        sku=m.get("product_sku"),
+                        supplier_code=m.get("supplier_code"),
+                        description=m.get("description"),
+                        existing_price=existing_retail,
+                        suggested_price=retail,
+                        changed=should_update_retail,
+                        reason=retail_reason,
+                    )
                     products_updated.append({
                         "product_id": m["product_id"],
                         "name": m.get("product_name"),
                         "new_supply_price": m["unit_cost"],
-                        "new_retail_price": retail,
+                        "new_retail_price": (
+                            retail if should_update_retail else None
+                        ),
                     })
             except LightspeedError as exc:
                 errors.append(f"Failed to update {m.get('product_name')}: {exc}")
@@ -767,16 +843,46 @@ async def finalize_invoice(
                 )
             if body.update_costs_for_existing:
                 try:
+                    product = await _get_existing_product(dec.lightspeed_product_id)
+                    existing_retail = _existing_retail(product)
+                    should_update_retail, retail_reason = retail_update_decision(
+                        existing_retail,
+                        dec.retail_price_override,
+                    )
                     upd = {"supply_price": dec.unit_cost}
-                    if dec.retail_price_override is not None:
+                    if should_update_retail:
                         upd["retail_price"] = dec.retail_price_override
-                    await client.update_product(dec.lightspeed_product_id, **upd)
-                    products_updated.append({
-                        "product_id": dec.lightspeed_product_id,
-                        "name": dec.description,
-                        "new_supply_price": dec.unit_cost,
-                        "new_retail_price": dec.retail_price_override,
-                    })
+                    result = await client.update_product(
+                        dec.lightspeed_product_id, **upd
+                    )
+                    if result:
+                        product_cache[dec.lightspeed_product_id] = result
+                    _report_retail_decision(
+                        product_id=dec.lightspeed_product_id,
+                        name=(product or {}).get("name") or dec.description,
+                        sku=(product or {}).get("sku"),
+                        supplier_code=dec.supplier_code,
+                        description=dec.description,
+                        existing_price=existing_retail,
+                        suggested_price=dec.retail_price_override,
+                        changed=should_update_retail,
+                        reason=retail_reason,
+                    )
+                    if result is None:
+                        errors.append(
+                            f"Could not update prices on {dec.description} "
+                            f"(product may be archived); consignment will still include it."
+                        )
+                    else:
+                        products_updated.append({
+                            "product_id": dec.lightspeed_product_id,
+                            "name": dec.description,
+                            "new_supply_price": dec.unit_cost,
+                            "new_retail_price": (
+                                dec.retail_price_override
+                                if should_update_retail else None
+                            ),
+                        })
                 except LightspeedError as exc:
                     errors.append(f"Failed to update: {exc}")
 
@@ -956,6 +1062,7 @@ async def finalize_invoice(
         "items_failed": items_failed,
         "products_created": products_created,
         "products_updated": products_updated,
+        "retail_price_report": retail_price_report,
         "skipped": skipped,
         "queued_for_enrichment_count": len(queued_for_enrichment),
         "enrichment_batch_id": enrichment_batch_id,

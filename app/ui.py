@@ -672,6 +672,30 @@ async function finalize() {
       }
       if (data.products_created.length) h += '<br>Created ' + data.products_created.length + ' new products.';
       if (data.products_updated.length) h += '<br>Updated ' + data.products_updated.length + ' existing products.';
+      if (data.retail_price_report && data.retail_price_report.length) {
+        const changed = data.retail_price_report.filter(r => r.changed);
+        const skipped = data.retail_price_report.filter(r => !r.changed);
+        h += '<br>Retail price changes: <strong>' + changed.length + '</strong> raised, '
+          + '<strong>' + skipped.length + '</strong> left unchanged.';
+        h += '<details style="margin-top:10px"><summary style="cursor:pointer">'
+          + 'Show retail price report</summary>'
+          + '<table style="margin-top:8px"><thead><tr>'
+          + '<th>Product</th><th>Code</th><th class="num">Existing</th>'
+          + '<th class="num">Suggested</th><th>Status</th></tr></thead><tbody>';
+        data.retail_price_report.forEach(r => {
+          h += '<tr>'
+            + '<td>' + escape(r.name || r.description || '—') + '</td>'
+            + '<td>' + escape(r.sku || r.supplier_code || '—') + '</td>'
+            + '<td class="num">' + (r.existing_retail_price != null ? fmtMoney(r.existing_retail_price) : '—') + '</td>'
+            + '<td class="num">' + (r.suggested_retail_price != null ? fmtMoney(r.suggested_retail_price) : '—') + '</td>'
+            + '<td>' + (r.changed
+                ? '<span style="color:var(--good)">raised</span>'
+                : '<span style="color:var(--muted)">unchanged</span>')
+              + '<br><small>' + escape(r.reason || '') + '</small></td>'
+            + '</tr>';
+        });
+        h += '</tbody></table></details>';
+      }
       if (data.queued_for_enrichment_count > 0) {
         h += '<br><strong>' + data.queued_for_enrichment_count
           + ' new product(s) queued for enrichment.</strong> '
