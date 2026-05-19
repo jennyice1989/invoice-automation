@@ -321,6 +321,21 @@ def _brand_compatible(line: RawInvoiceLine, product: dict) -> bool:
     return bool(line_brand and product_brand and line_brand == product_brand)
 
 
+def _linked_supplier_item_is_safe(line: RawInvoiceLine, product: dict | None) -> bool:
+    """Guard saved supplier memory against stale fuzzy links.
+
+    A human-approved or code-supported link should stay automatic. A link that
+    only exists because an earlier fuzzy pass guessed "same-ish name" should
+    be re-reviewed when the current invoice description and product name have
+    conflicting sizes or model numbers.
+    """
+    if not product:
+        return True
+    if not _has_numeric_conflict(line.description, product.get("name", "")):
+        return True
+    return _identifier_digits_match(line.supplier_code, product)
+
+
 class MatchingService:
     """Resolves invoice lines to Lightspeed products."""
 
@@ -391,16 +406,23 @@ class MatchingService:
                     self.session,
                     supplier_item.lightspeed_product_id,
                 )
-                return MatchedLine(
-                    raw=line,
-                    product_id=supplier_item.lightspeed_product_id,
-                    product_sku=product.get("sku") if product else None,
-                    product_name=(
-                        product.get("name") if product else supplier_item.description
-                    ),
-                    matched_by="supplier_item",
-                    confidence=1.0,
-                )
+                if not _linked_supplier_item_is_safe(line, product):
+                    logger.info(
+                        "Ignoring stale supplier-item link for %s -> %s due to numeric conflict",
+                        line.supplier_code,
+                        supplier_item.lightspeed_product_id,
+                    )
+                else:
+                    return MatchedLine(
+                        raw=line,
+                        product_id=supplier_item.lightspeed_product_id,
+                        product_sku=product.get("sku") if product else None,
+                        product_name=(
+                            product.get("name") if product else supplier_item.description
+                        ),
+                        matched_by="supplier_item",
+                        confidence=1.0,
+                    )
 
         # Tier 2: barcode/UPC match (primary signal for catalogs where the
         # Lightspeed SKU field IS the UPC, which is common in pet retail).
