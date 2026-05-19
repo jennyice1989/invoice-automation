@@ -156,6 +156,18 @@ _BRAND_ALIASES = {
     "current": "current",
 }
 
+_SUPPLIER_CODE_BRANDS = {
+    "API": "api",
+    "AT": "aquatop",
+    "CAR": "caribsea",
+    "FM": "fritz",
+    "HI": "hikari",
+    "SC": "seachem",
+    "SER": "sera",
+    "SI": "sicce",
+    "ZM": "zoomed",
+}
+
 
 def _detect_brand(text: str | None) -> str | None:
     """Find the first brand alias that appears in the text. Returns
@@ -172,6 +184,16 @@ def _detect_brand(text: str | None) -> str | None:
         # Also match at start (no leading space possible)
         if t.lstrip().startswith(alias.lower()):
             return _BRAND_ALIASES[alias]
+    return None
+
+
+def _brand_from_supplier_code(code: str | None) -> str | None:
+    if not code:
+        return None
+    code = code.strip().upper()
+    for prefix in sorted(_SUPPLIER_CODE_BRANDS, key=len, reverse=True):
+        if code.startswith(prefix):
+            return _SUPPLIER_CODE_BRANDS[prefix]
     return None
 
 
@@ -241,6 +263,62 @@ def _trailing_digits(s: str | None) -> list[str]:
     if stripped and stripped != digits and len(stripped) >= 3:
         candidates.append(stripped)
     return candidates
+
+
+def _numbers(text: str | None) -> set[str]:
+    """Extract significant numeric tokens from a product description/name."""
+    if not text:
+        return set()
+    values = set()
+    for raw in re.findall(r"\d+(?:\.\d+)?", text.lower()):
+        value = raw.lstrip("0") or "0"
+        if "." in value:
+            value = value.rstrip("0").rstrip(".")
+        values.add(value)
+    return values
+
+
+def _has_numeric_conflict(invoice_text: str | None, product_text: str | None) -> bool:
+    """True when both sides mention numbers but none agree.
+
+    This keeps fuzzy matching from auto-accepting size/model variants like
+    "4L" vs "500mL" or "SDC 7.0" vs "SDC 6.0".
+    """
+    invoice_numbers = _numbers(invoice_text)
+    product_numbers = _numbers(product_text)
+    return bool(invoice_numbers and product_numbers and not invoice_numbers & product_numbers)
+
+
+def _identifier_digits_match(supplier_code: str | None, product: dict) -> bool:
+    """Check if a supplier code's numeric tail appears in SKU/barcode fields.
+
+    Many UPCs embed the distributor item number plus a check digit:
+    AT01251 -> 810281012513. This is much stronger than a fuzzy name match,
+    but only useful for reasonably long numeric tails.
+    """
+    digit_forms = [d for d in _trailing_digits(supplier_code) if len(d) >= 5]
+    if not digit_forms:
+        return False
+    haystack = "".join([
+        re.sub(r"\D", "", str(product.get("sku") or "")),
+        " ",
+        re.sub(r"\D", "", str(product.get("barcode") or "")),
+    ])
+    return any(d in haystack for d in digit_forms)
+
+
+def _brand_compatible(line: RawInvoiceLine, product: dict) -> bool:
+    line_brand = (
+        _detect_brand(line.description)
+        or _brand_from_supplier_code(line.supplier_code)
+    )
+    product_brand = _detect_brand(
+        " ".join([
+            product.get("name", "") or "",
+            product.get("brand_name", "") or "",
+        ])
+    )
+    return bool(line_brand and product_brand and line_brand == product_brand)
 
 
 class MatchingService:
@@ -394,6 +472,24 @@ class MatchingService:
                         confidence=1.0,
                     )
 
+        # Tier 2.55: distributor code embedded in SKU/barcode. UPCs commonly
+        # contain the supplier's numeric item code with a check digit. Require
+        # brand compatibility so generic short item numbers don't cross-match.
+        if line.supplier_code and catalog_products:
+            for p in catalog_products:
+                if (
+                    _identifier_digits_match(line.supplier_code, p)
+                    and _brand_compatible(line, p)
+                ):
+                    return MatchedLine(
+                        raw=line,
+                        product_id=p["id"],
+                        product_sku=p.get("sku"),
+                        product_name=p.get("name"),
+                        matched_by="catalog_identifier_digits",
+                        confidence=1.0,
+                    )
+
         # Tier 2.6: exact supplier_code lookup in Lightspeed. The local
         # catalog list endpoint may omit supplier_code on some accounts, but
         # Lightspeed can still filter by it. This is a high-confidence signal
@@ -472,14 +568,21 @@ class MatchingService:
 
             scored.sort(key=lambda x: x[0], reverse=True)
             top_total, top_sim, top_boost, top_digits, top_product = scored[0]
+            numeric_conflict = _has_numeric_conflict(
+                line.description,
+                top_product.get("name", ""),
+            )
 
             # Auto-match rules — designed to avoid false matches:
             #   - Confident only if digit-boost fires (cross-distributor signal)
             #   - OR name similarity is very high (0.80+) on its own
             # Plain "the name kind of looks similar" (0.60-0.79) stays uncertain.
             should_auto_match = (
-                (top_digits and top_total >= FUZZY_MATCH_THRESHOLD)
-                or top_sim >= 0.80
+                not numeric_conflict
+                and (
+                    (top_digits and top_total >= FUZZY_MATCH_THRESHOLD)
+                    or top_sim >= 0.80
+                )
             )
             if should_auto_match:
                 return MatchedLine(
