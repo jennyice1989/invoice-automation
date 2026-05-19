@@ -143,19 +143,19 @@ async def test_auth_error_raises(client_factory):
 
 @pytest.mark.asyncio
 async def test_list_products_walks_all_pages(client_factory):
-    seen_pages: list[str | None] = []
+    seen_after: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        page = request.url.params.get("page")
-        seen_pages.append(page)
-        if page == "1":
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        if after is None:
             return httpx.Response(200, json={"data": [
-                {"id": "p1", "name": "First", "active": True},
-                {"id": "p2", "name": "Second", "active": True},
+                {"id": "p1", "name": "First", "active": True, "version": 10},
+                {"id": "p2", "name": "Second", "active": True, "version": 11},
             ]})
-        if page == "2":
+        if after == "11":
             return httpx.Response(200, json={"data": [
-                {"id": "p3", "name": "Third", "active": True},
+                {"id": "p3", "name": "Third", "active": True, "version": 12},
             ]})
         return httpx.Response(200, json={"data": []})
 
@@ -163,7 +163,7 @@ async def test_list_products_walks_all_pages(client_factory):
     products = await client.list_products(page_size=2)
 
     assert [p["id"] for p in products] == ["p1", "p2", "p3"]
-    assert seen_pages == ["1", "2"]
+    assert seen_after == [None, "11"]
     await client.close()
 
 

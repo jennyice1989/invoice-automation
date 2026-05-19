@@ -288,20 +288,22 @@ class LightspeedClient:
         self,
         *,
         supplier_id: str | None = None,
-        page_size: int = 500,
+        page_size: int = 200,
         max_pages: int = 200,
     ) -> list[dict]:
-        """Return the full live product catalog, walking pagination.
+        """Return the full live product catalog, walking cursor pagination.
 
-        X-Series list endpoints silently return a page when no paging is
-        provided. Matching against just that first page made invoice lines
-        look unrelated to the catalog, so callers that need catalog-wide
-        matching should use this helper.
+        X-Series API 2.0 uses product `version` cursors (`after`/`before`)
+        for list pagination. A traditional `page=2` parameter can be
+        ignored, which leaves the app with only the first slice of inventory.
         """
         products: list[dict] = []
         seen_ids: set[str] = set()
-        for page in range(1, max_pages + 1):
-            params: dict[str, Any] = {"page_size": page_size, "page": page}
+        after: int | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"page_size": page_size}
+            if after is not None:
+                params["after"] = after
             if supplier_id:
                 params["supplier_id"] = supplier_id
             data = await self._request("GET", "/products", params=params)
@@ -322,8 +324,20 @@ class LightspeedClient:
                     products.append(item)
                     added += 1
 
-            if len(raw_items) < page_size or added == 0:
+            versions = [
+                int(item["version"]) for item in raw_items
+                if isinstance(item, dict)
+                and str(item.get("version", "")).isdigit()
+            ]
+            next_after = max(versions) if versions else None
+            if (
+                len(raw_items) < page_size
+                or added == 0
+                or next_after is None
+                or next_after == after
+            ):
                 break
+            after = next_after
 
         return products
 
