@@ -459,6 +459,7 @@ function render() {
     html += '<div class="bucket-title"><span class="badge uncertain">Uncertain</span>'
          + '<h2>Needs your decision</h2>'
          + '<small>(' + d.uncertain.length + ' — pick existing, create new, or skip)</small>'
+         + (isImported ? '' : '<button class="cand-btn" onclick="queueAllUnresolved()">Queue all new</button>')
          + '</div>';
     d.uncertain.forEach((u, i) => {
       html += renderUncertainRow(u, i, isImported);
@@ -600,6 +601,20 @@ function openCreateNew(i) {
     barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
     kind_hint: normalized,
   };
+  render();
+}
+
+function queueAllUnresolved() {
+  if (!confirm('Queue every undecided line as a new product draft?')) return;
+  (DATA.data.uncertain || []).forEach((u, i) => {
+    if (DECISIONS[i]) return;
+    DECISIONS[i] = {
+      decision: 'queue_enrich',
+      supplier_code: u.supplier_code, description: u.description,
+      barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
+      kind_hint: null,
+    };
+  });
   render();
 }
 

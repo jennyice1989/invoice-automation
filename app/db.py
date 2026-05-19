@@ -14,9 +14,10 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from sqlalchemy import (
+    Boolean,
     JSON,
     DateTime,
     Float,
@@ -56,11 +57,78 @@ class SupplierSkuMapping(Base):
     supplier_id: Mapped[str] = mapped_column(String(64), index=True)
     supplier_code: Mapped[str] = mapped_column(String(255), index=True)
     lightspeed_product_id: Mapped[str] = mapped_column(String(64))
-    lightspeed_sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    product_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    lightspeed_sku: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+# --------------------------------------------------------------------- #
+# Local catalog cache                                                   #
+# --------------------------------------------------------------------- #
+
+class CatalogProduct(Base):
+    """Local copy of a Lightspeed product.
+
+    Invoice matching and manual search should read from this table first.
+    Lightspeed remains the source of truth, but a local cache makes matching
+    deterministic, fast, and easier to debug.
+    """
+
+    __tablename__ = "catalog_products"
+    __table_args__ = (
+        UniqueConstraint(
+            "lightspeed_product_id", name="uq_catalog_lightspeed_product_id"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lightspeed_product_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, index=True)
+    normalized_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, index=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    supplier_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    supplier_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    brand_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    category_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    supply_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    retail_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    deleted_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    raw: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class SupplierCatalogItem(Base):
+    """Supplier item memory, including products that are not in Lightspeed yet."""
+
+    __tablename__ = "supplier_catalog_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "supplier_id", "supplier_code", name="uq_supplier_catalog_code"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[str] = mapped_column(String(64), index=True)
+    supplier_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    supplier_code: Mapped[str] = mapped_column(String(255), index=True)
+    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    lightspeed_product_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="needs_product", index=True)
+    last_unit_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    seen_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
@@ -84,29 +152,29 @@ class Invoice(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    supplier_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    supplier_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    supplier_invoice_number: Mapped[str | None] = mapped_column(
+    filename: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    supplier_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    supplier_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    supplier_invoice_number: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, index=True
     )
-    invoice_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    subtotal: Mapped[float | None] = mapped_column(Float, nullable=True)
-    tax: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total: Mapped[float | None] = mapped_column(Float, nullable=True)
-    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    invoice_date: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    subtotal: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tax: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    page_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Lifecycle: EXTRACTED -> REVIEWED -> IMPORTED | FAILED | DUPLICATE
     status: Mapped[str] = mapped_column(String(32), default="EXTRACTED")
-    consignment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consignment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Cached extraction + match results so the review page survives a refresh.
-    extraction_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    extraction_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # Original PDF bytes — kept so the invoice can be re-processed later
     # after pipeline improvements. Invoices are small; this is fine at
     # single-store volume. Nullable so old rows without it still load.
-    pdf_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    pdf_bytes: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True
@@ -128,20 +196,20 @@ class InvoiceLine(Base):
         ForeignKey("invoices.id", ondelete="CASCADE"), index=True
     )
 
-    supplier_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    supplier_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     quantity: Mapped[float] = mapped_column(Float)
     unit_cost: Mapped[float] = mapped_column(Float)
 
     # Resolution
     bucket: Mapped[str] = mapped_column(String(32))  # match | new | update | uncertain | skipped
-    lightspeed_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    suggested_retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    final_retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    pricing_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lightspeed_product_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    suggested_retail_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    final_retail_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pricing_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # match_meta holds match_method, confidence, candidates, scraped_data
-    match_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    match_meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     invoice: Mapped[Invoice] = relationship(back_populates="lines")
 
@@ -160,7 +228,7 @@ class PricingRule(Base):
     name: Mapped[str] = mapped_column(String(100))
     # Match logic: any of these tokens (case-insensitive) in product
     # category or description will match. Empty = matches anything.
-    keywords: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keywords: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     multiplier: Mapped[float] = mapped_column(Float)  # 2.2 means 2.2x cost
     rounding: Mapped[str] = mapped_column(String(16), default="charm")
     # rounding: 'none' | 'cents_99' (round up to .99) | 'charm' (.99/.49)
@@ -182,10 +250,10 @@ class SupplierMsrp(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     supplier_id: Mapped[str] = mapped_column(String(64), index=True)
-    supplier_code: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    supplier_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     msrp: Mapped[float] = mapped_column(Float)
-    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow
     )
@@ -200,47 +268,47 @@ class EnrichmentDraft(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # A batch groups products entered together (one bulk-paste, one import).
-    batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    batch_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     input_name: Mapped[str] = mapped_column(String(500))
     kind: Mapped[str] = mapped_column(String(16), default="unknown")  # dry_good | live_fish | unknown
 
     # Drafted by Claude
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    fish_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    detected_brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    fish_profile: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    detected_brand: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
     # Manually entered / from invoice
-    final_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    supplier_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    supplier_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    supply_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    supplier_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    supplier_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    supply_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    retail_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     has_photo: Mapped[bool] = mapped_column(default=False)
 
     # New: catalog organization
-    product_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    product_category_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    brand_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    brand_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {"list": [...]}
+    product_category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    product_category_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    brand_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    brand_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tags: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # {"list": [...]}
 
     status: Mapped[str] = mapped_column(String(16), default="DRAFT")  # DRAFT | CREATED | SKIPPED
-    lightspeed_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    warnings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lightspeed_product_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    warnings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # If this draft was queued from an invoice, hold enough context to
     # add the resulting product to that invoice's consignment after
     # the user approves it.
-    source_invoice_id: Mapped[int | None] = mapped_column(
+    source_invoice_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True,
     )
-    source_consignment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    source_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    source_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_consignment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True
@@ -315,6 +383,42 @@ async def init_db() -> None:
         ))
         # Enrichment draft source columns (added when invoice integration shipped)
         for stmt in (
+            "CREATE TABLE IF NOT EXISTS catalog_products (id SERIAL PRIMARY KEY)",
+            "CREATE TABLE IF NOT EXISTS supplier_catalog_items (id SERIAL PRIMARY KEY)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS lightspeed_product_id VARCHAR(64)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS name VARCHAR(500)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(500)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS sku VARCHAR(255)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS barcode VARCHAR(255)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS supplier_id VARCHAR(64)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS brand_name VARCHAR(255)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS category_name VARCHAR(255)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS supply_price DOUBLE PRECISION",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS retail_price DOUBLE PRECISION",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS deleted_at VARCHAR(64)",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS raw JSONB",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_catalog_lightspeed_product_id_idx ON catalog_products(lightspeed_product_id)",
+            "CREATE INDEX IF NOT EXISTS ix_catalog_products_sku ON catalog_products(sku)",
+            "CREATE INDEX IF NOT EXISTS ix_catalog_products_barcode ON catalog_products(barcode)",
+            "CREATE INDEX IF NOT EXISTS ix_catalog_products_supplier_code ON catalog_products(supplier_code)",
+            "CREATE INDEX IF NOT EXISTS ix_catalog_products_normalized_name ON catalog_products(normalized_name)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_id VARCHAR(64)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(500)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS description VARCHAR(500)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(64)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS lightspeed_product_id VARCHAR(64)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'needs_product'",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS last_unit_cost DOUBLE PRECISION",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS seen_count INTEGER DEFAULT 0",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_catalog_code_idx ON supplier_catalog_items(supplier_id, supplier_code)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_invoice_id INTEGER",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_consignment_id VARCHAR(64)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION",

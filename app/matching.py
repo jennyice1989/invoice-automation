@@ -23,6 +23,12 @@ from difflib import SequenceMatcher
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.catalog import (
+    find_cached_product_by_id,
+    find_cached_product_by_code,
+    find_linked_supplier_item,
+    get_cached_products,
+)
 from app.db import find_mapping
 from app.lightspeed import LightspeedClient, LightspeedError
 
@@ -249,10 +255,11 @@ class MatchingService:
         supplier_id: str,
         lines: list[RawInvoiceLine],
     ) -> MatchResult:
-        # Pull the full catalog once for exact supplier-code and fuzzy
-        # matching. A supplier-filtered first page missed most real products
-        # in Lightspeed, which made invoice lines look unrelated.
-        catalog_products = await self._load_catalog_products()
+        # Prefer the local catalog cache. If it has not been synced yet,
+        # fall back to a live pull so uploads still work on a fresh deploy.
+        catalog_products = await get_cached_products(self.session)
+        if not catalog_products:
+            catalog_products = await self._load_catalog_products()
 
         matched: list[MatchedLine] = []
         unmatched: list[UnmatchedLine] = []
@@ -292,6 +299,31 @@ class MatchingService:
                     confidence=1.0,
                 )
 
+        # Tier 1.5: supplier item memory. This is the "catalog-first" layer:
+        # once a missing supplier item is created and linked, future invoices
+        # match before any fuzzy search.
+        if line.supplier_code:
+            supplier_item = await find_linked_supplier_item(
+                self.session,
+                supplier_id=supplier_id,
+                supplier_code=line.supplier_code,
+            )
+            if supplier_item and supplier_item.lightspeed_product_id:
+                product = await find_cached_product_by_id(
+                    self.session,
+                    supplier_item.lightspeed_product_id,
+                )
+                return MatchedLine(
+                    raw=line,
+                    product_id=supplier_item.lightspeed_product_id,
+                    product_sku=product.get("sku") if product else None,
+                    product_name=(
+                        product.get("name") if product else supplier_item.description
+                    ),
+                    matched_by="supplier_item",
+                    confidence=1.0,
+                )
+
         # Tier 2: barcode/UPC match (primary signal for catalogs where the
         # Lightspeed SKU field IS the UPC, which is common in pet retail).
         # We try both the extracted barcode AND supplier_code, because
@@ -299,6 +331,18 @@ class MatchingService:
         for code in (line.barcode, line.supplier_code):
             if not code:
                 continue
+            product = await find_cached_product_by_code(
+                self.session, code, fields=("barcode", "sku")
+            )
+            if product:
+                return MatchedLine(
+                    raw=line,
+                    product_id=product["id"],
+                    product_sku=product.get("sku"),
+                    product_name=product.get("name"),
+                    matched_by="cached_barcode_sku",
+                    confidence=1.0,
+                )
             # Try barcode lookup
             try:
                 product = await self.ls.find_product_by_barcode(code)

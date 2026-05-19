@@ -26,6 +26,13 @@ from app.auth import (
     APP_PASSWORD, COOKIE_MAX_AGE, COOKIE_NAME, check_password,
     make_token, require_auth, require_auth_html,
 )
+from app.catalog import (
+    catalog_status,
+    remember_supplier_item,
+    search_cached_products,
+    sync_lightspeed_catalog,
+    upsert_cached_product,
+)
 from app.db import (
     EnrichmentDraft,
     Invoice, InvoiceLine, PricingRule, SupplierMsrp, SupplierSkuMapping,
@@ -268,6 +275,25 @@ async def list_brands_endpoint():
     return {"data": items}
 
 
+@app.get("/catalog/status", dependencies=[Depends(require_auth)])
+async def get_catalog_status(session: AsyncSession = Depends(_session)):
+    return await catalog_status(session)
+
+
+@app.post("/catalog/sync", dependencies=[Depends(require_auth)])
+async def sync_catalog(session: AsyncSession = Depends(_session)):
+    try:
+        result = await sync_lightspeed_catalog(session, _client())
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {
+        "ok": True,
+        "product_count": result.total,
+        "upserted": result.upserted,
+        "synced_at": result.synced_at.isoformat(),
+    }
+
+
 # --------------------------------------------------------------------- #
 # Upload / process                                                      #
 # --------------------------------------------------------------------- #
@@ -347,6 +373,12 @@ async def _run_pipeline(
     matched_results: list = []
     unmatched_results: list = []
     if supplier_id and extracted.lines:
+        status_info = await catalog_status(session)
+        if not status_info["product_count"]:
+            try:
+                await sync_lightspeed_catalog(session, client)
+            except LightspeedError as exc:
+                extracted.warnings.append(f"Catalog sync failed; matching live: {exc}")
         service = MatchingService(client, session)
         raw = [
             RawInvoiceLine(
@@ -384,6 +416,17 @@ async def _run_pipeline(
     uncertain_payload: list[dict] = []
 
     for m in matched_results:
+        await remember_supplier_item(
+            session,
+            supplier_id=supplier_id,
+            supplier_name=supplier_name,
+            supplier_code=m.raw.supplier_code,
+            description=m.raw.description,
+            barcode=m.raw.barcode,
+            unit_cost=m.raw.unit_cost,
+            lightspeed_product_id=m.product_id,
+            status="linked",
+        )
         pr = await _price(
             m.raw.supplier_code, m.raw.barcode, m.raw.description, m.raw.unit_cost,
         )
@@ -411,6 +454,16 @@ async def _run_pipeline(
         })
 
     for u in unmatched_results:
+        await remember_supplier_item(
+            session,
+            supplier_id=supplier_id,
+            supplier_name=supplier_name,
+            supplier_code=u.raw.supplier_code,
+            description=u.raw.description,
+            barcode=u.raw.barcode,
+            unit_cost=u.raw.unit_cost,
+            status="needs_product",
+        )
         pr = await _price(
             u.raw.supplier_code, u.raw.barcode, u.raw.description, u.raw.unit_cost,
         )
@@ -701,6 +754,17 @@ async def finalize_invoice(
                     lightspeed_sku=None,
                     product_name=dec.description,
                 )
+                await remember_supplier_item(
+                    session,
+                    supplier_id=invoice.supplier_id,
+                    supplier_name=invoice.supplier_name,
+                    supplier_code=dec.supplier_code,
+                    description=dec.description,
+                    barcode=dec.barcode,
+                    unit_cost=dec.unit_cost,
+                    lightspeed_product_id=dec.lightspeed_product_id,
+                    status="linked",
+                )
             if body.update_costs_for_existing:
                 try:
                     upd = {"supply_price": dec.unit_cost}
@@ -747,6 +811,7 @@ async def finalize_invoice(
                     "sku": dec.new_product_sku, "supply_price": dec.unit_cost,
                     "retail_price": dec.new_retail_price,
                 })
+                await upsert_cached_product(session, created)
                 # Save mapping for next time
                 if dec.supplier_code and invoice.supplier_id:
                     await upsert_mapping(
@@ -756,6 +821,17 @@ async def finalize_invoice(
                         lightspeed_product_id=new_id,
                         lightspeed_sku=dec.new_product_sku,
                         product_name=dec.new_product_name,
+                    )
+                    await remember_supplier_item(
+                        session,
+                        supplier_id=invoice.supplier_id,
+                        supplier_name=invoice.supplier_name,
+                        supplier_code=dec.supplier_code,
+                        description=dec.description or dec.new_product_name,
+                        barcode=dec.barcode,
+                        unit_cost=dec.unit_cost,
+                        lightspeed_product_id=new_id,
+                        status="linked",
                     )
                 items_for_lightspeed.append(MatchedLineItem(
                     product_id=new_id, count=dec.quantity, cost=dec.unit_cost,
@@ -962,7 +1038,7 @@ async def export_csv(
 # --------------------------------------------------------------------- #
 
 @app.get("/products/search", dependencies=[Depends(require_auth)])
-async def search_products(q: str):
+async def search_products(q: str, session: AsyncSession = Depends(_session)):
     """Search products by name (for manual selection in the review UI).
 
     Walks the full Lightspeed catalog and ranks locally. The Lightspeed
@@ -973,7 +1049,10 @@ async def search_products(q: str):
     if not q:
         return {"data": []}
     try:
-        products = await _client().search_products(q, limit=20)
+        status_info = await catalog_status(session)
+        if not status_info["product_count"]:
+            await sync_lightspeed_catalog(session, _client())
+        products = await search_cached_products(session, q, limit=20)
     except LightspeedError as exc:
         raise HTTPException(502, str(exc)) from exc
     items = []
@@ -1412,6 +1491,7 @@ async def create_from_draft(
     draft.product_category_id = category_id
     draft.brand_id = brand_id
     draft.error = None
+    await upsert_cached_product(session, created)
 
     # Add to source consignment if there is one
     added_to_consignment = False
@@ -1482,6 +1562,17 @@ async def create_from_draft(
             lightspeed_product_id=new_id,
             lightspeed_sku=draft.sku,
             product_name=name,
+        )
+        await remember_supplier_item(
+            session,
+            supplier_id=draft.supplier_id,
+            supplier_name=None,
+            supplier_code=draft.supplier_code,
+            description=name,
+            barcode=draft.barcode,
+            unit_cost=draft.source_cost or draft.supply_price,
+            lightspeed_product_id=new_id,
+            status="linked",
         )
 
     return {
