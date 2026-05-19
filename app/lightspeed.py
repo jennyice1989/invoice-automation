@@ -568,7 +568,31 @@ class LightspeedClient:
         if reference:
             payload["reference"] = reference
 
-        data = await self._request("POST", "/consignments", json=payload)
+        try:
+            data = await self._request("POST", "/consignments", json=payload)
+        except LightspeedError as exc:
+            message = str(exc).lower()
+            if "order number validation failed" not in message:
+                raise
+
+            # Some Lightspeed accounts validate `reference` and/or
+            # `supplier_invoice` as an order number. Keep the invoice number
+            # in the consignment name and retry with the stricter fields
+            # removed so the import is not blocked.
+            retry_payload = dict(payload)
+            retry_payload.pop("reference", None)
+            if retry_payload != payload:
+                try:
+                    data = await self._request(
+                        "POST", "/consignments", json=retry_payload
+                    )
+                    return data.get("data", data)
+                except LightspeedError as retry_exc:
+                    if "order number validation failed" not in str(retry_exc).lower():
+                        raise
+
+            retry_payload.pop("supplier_invoice", None)
+            data = await self._request("POST", "/consignments", json=retry_payload)
         return data.get("data", data)
 
     async def add_product_to_consignment(
@@ -799,7 +823,6 @@ class LightspeedClient:
             outlet_id=outlet_id,
             supplier_id=supplier_id,
             supplier_invoice=supplier_invoice_number,
-            reference=supplier_invoice_number,
         )
         consignment_id = consignment["id"]
         logger.info("Created consignment %s", consignment_id)

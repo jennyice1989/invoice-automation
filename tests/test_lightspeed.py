@@ -80,6 +80,43 @@ async def test_create_consignment_sends_correct_payload(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_create_consignment_retries_without_order_number_fields(client_factory):
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "reference" in body:
+            return httpx.Response(
+                400,
+                json={"errors": {"global": ["Order number validation failed"]}},
+            )
+        if "supplier_invoice" in body:
+            return httpx.Response(
+                400,
+                json={"errors": {"global": ["Order number validation failed"]}},
+            )
+        return httpx.Response(200, json={"id": "cons-1", "name": body["name"]})
+
+    client = client_factory(handler)
+    result = await client.create_consignment(
+        name="Invoice INV-001",
+        outlet_id="out-1",
+        supplier_id="sup-1",
+        supplier_invoice="INV-001",
+        reference="INV-001",
+    )
+
+    assert result["id"] == "cons-1"
+    assert "reference" in bodies[0]
+    assert "reference" not in bodies[1]
+    assert "supplier_invoice" in bodies[1]
+    assert "supplier_invoice" not in bodies[2]
+    assert bodies[2]["name"] == "Invoice INV-001"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_add_product_includes_received_when_set(client_factory):
     captured: dict[str, Any] = {}
 
@@ -317,12 +354,14 @@ async def test_create_product_reports_unexpected_string_response(client_factory)
 async def test_import_invoice_full_receive_flow(client_factory):
     """End-to-end: create -> add items -> dispatched -> received."""
     calls: list[tuple[str, str]] = []
+    consignment_body: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         calls.append((request.method, path))
 
         if request.method == "POST" and path.endswith("/consignments"):
+            consignment_body.update(json.loads(request.content))
             return httpx.Response(200, json={
                 "id": "cons-1", "name": "x", "status": "OPEN",
             })
@@ -349,6 +388,7 @@ async def test_import_invoice_full_receive_flow(client_factory):
     # 1 create + 2 add product + 2 status updates (DISPATCHED, RECEIVED)
     assert methods.count("POST") == 3
     assert methods.count("PUT") == 2
+    assert "reference" not in consignment_body
     assert result["status"] == "RECEIVED"
     assert result["items_added"] == 2
     assert result["items_failed"] == 0
