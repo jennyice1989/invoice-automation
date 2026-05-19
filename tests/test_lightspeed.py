@@ -188,6 +188,76 @@ async def test_search_products_ranks_full_catalog_locally(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_create_product_accepts_data_list_response(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{
+            "id": "prod-1",
+            "name": "New Product",
+            "sku": "SKU-1",
+        }]})
+
+    client = client_factory(handler)
+    product = await client.create_product(
+        name="New Product",
+        sku="SKU-1",
+        supplier_code="SUP-1",
+        supply_price=1.25,
+        retail_price=2.99,
+    )
+
+    assert captured["body"]["name"] == "New Product"
+    assert captured["body"]["sku"] == "SKU-1"
+    assert captured["body"]["supplier_code"] == "SUP-1"
+    assert product["id"] == "prod-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_product_fetches_product_when_response_is_id_string(client_factory):
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path.endswith("/products"):
+            return httpx.Response(
+                200,
+                json={"data": "123e4567-e89b-12d3-a456-426614174000"},
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/products/123e4567-e89b-12d3-a456-426614174000"
+        ):
+            return httpx.Response(200, json={"data": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "name": "Fetched Product",
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.create_product(name="Fetched Product")
+
+    assert calls == [
+        ("POST", "/api/2.0/products"),
+        ("GET", "/api/2.0/products/123e4567-e89b-12d3-a456-426614174000"),
+    ]
+    assert product["name"] == "Fetched Product"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_product_reports_unexpected_string_response(client_factory):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": "missing required field"})
+
+    client = client_factory(handler)
+    with pytest.raises(LightspeedError, match="missing required field"):
+        await client.create_product(name="Bad Product")
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_import_invoice_full_receive_flow(client_factory):
     """End-to-end: create -> add items -> dispatched -> received."""
     calls: list[tuple[str, str]] = []

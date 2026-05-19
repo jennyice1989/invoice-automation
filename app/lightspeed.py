@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -17,6 +18,11 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _is_live_product(product: dict) -> bool:
@@ -163,7 +169,7 @@ class LightspeedClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
-    ) -> dict:
+    ) -> Any:
         """
         Execute a request with retry on 429 / 5xx.
 
@@ -216,7 +222,13 @@ class LightspeedClient:
             # 204 No Content is possible on some endpoints
             if resp.status_code == 204 or not resp.content:
                 return {}
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise LightspeedError(
+                    f"{method} {path} returned non-JSON response: "
+                    f"{resp.text[:500]}"
+                ) from exc
 
         raise LightspeedError(
             f"{method} {path} failed after {self.max_retries} attempts: {last_exc}"
@@ -559,6 +571,41 @@ class LightspeedClient:
     # Product create / update                                            #
     # ------------------------------------------------------------------ #
 
+    async def get_product(self, product_id: str) -> dict:
+        """Fetch one product by id and normalize Lightspeed's wrapper."""
+        data = await self._request("GET", f"/products/{product_id}")
+        product = self._unwrap_product_response(data, context="get product")
+        if not isinstance(product, dict):
+            raise LightspeedError(
+                f"Unexpected Lightspeed response for get product: "
+                f"{type(product).__name__}"
+            )
+        return product
+
+    def _unwrap_product_response(self, data: Any, *, context: str) -> dict | str:
+        """Normalize the product response shapes Lightspeed can return."""
+        if isinstance(data, dict):
+            inner = data.get("data", data)
+        else:
+            inner = data
+
+        if isinstance(inner, list):
+            if not inner:
+                raise LightspeedError(
+                    f"Lightspeed returned empty data during {context}"
+                )
+            inner = inner[0]
+
+        if isinstance(inner, dict):
+            return inner
+        if isinstance(inner, str):
+            return inner
+
+        raise LightspeedError(
+            f"Unexpected Lightspeed response during {context}: "
+            f"{type(inner).__name__}"
+        )
+
     async def create_product(
         self,
         *,
@@ -599,17 +646,17 @@ class LightspeedClient:
             payload["tag_ids"] = tag_ids
 
         data = await self._request("POST", "/products", json=payload)
-        # POST /products returns {"data": [ {...product...} ]} — a list
-        # of one. Other endpoints return data as a dict, so this helper
-        # has to handle both.
-        inner = data.get("data", data)
-        if isinstance(inner, list):
-            if not inner:
-                raise LightspeedError(
-                    "Lightspeed returned empty data on product create"
-                )
-            return inner[0]
-        return inner
+        # POST /products may return {"data": [{...product...}]}, a single
+        # product dict, or on some accounts just the new product id string.
+        inner = self._unwrap_product_response(data, context="product create")
+        if isinstance(inner, dict):
+            return inner
+        if _UUID_RE.match(inner.strip()):
+            return await self.get_product(inner.strip())
+        raise LightspeedError(
+            "Unexpected Lightspeed response during product create: "
+            f"string response {inner[:300]!r}"
+        )
 
     async def update_product(
         self,
