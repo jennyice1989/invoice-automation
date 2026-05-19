@@ -45,6 +45,22 @@ def _norm_search(s: str | None) -> str:
     return " ".join(str(s).lower().replace("-", " ").split())
 
 
+def _norm_supplier_name(s: str | None) -> str:
+    """Normalize supplier names for Lightspeed/invoice comparison."""
+    if not s:
+        return ""
+    text = str(s).lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [
+        token for token in text.split()
+        if token not in {
+            "inc", "incorporated", "llc", "ltd", "co", "company", "corp",
+            "corporation",
+        }
+    ]
+    return " ".join(tokens)
+
+
 def _product_search_score(query: str, product: dict) -> float:
     """Score a catalog product for manual search.
 
@@ -246,13 +262,47 @@ class LightspeedClient:
         data = await self._request("GET", "/outlets")
         return data.get("data", [])
 
-    async def list_suppliers(self, *, page_size: int = 200) -> list[dict]:
+    async def list_suppliers(
+        self,
+        *,
+        page_size: int = 200,
+        max_pages: int = 100,
+    ) -> list[dict]:
         """Return all suppliers. Useful for debugging name mismatches and
         for building a local supplier->id cache in the extraction layer."""
-        data = await self._request(
-            "GET", "/suppliers", params={"page_size": page_size}
-        )
-        return data.get("data", [])
+        suppliers: list[dict] = []
+        seen_ids: set[str] = set()
+        after: int | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"page_size": page_size}
+            if after is not None:
+                params["after"] = after
+            data = await self._request("GET", "/suppliers", params=params)
+            raw_items = data.get("data", []) if isinstance(data, dict) else []
+            if not isinstance(raw_items, list) or not raw_items:
+                break
+
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                supplier_id = item.get("id")
+                if supplier_id and supplier_id in seen_ids:
+                    continue
+                if supplier_id:
+                    seen_ids.add(supplier_id)
+                suppliers.append(item)
+
+            versions = [
+                int(item["version"]) for item in raw_items
+                if isinstance(item, dict)
+                and str(item.get("version", "")).isdigit()
+            ]
+            next_after = max(versions) if versions else None
+            if len(raw_items) < page_size or next_after is None or next_after == after:
+                break
+            after = next_after
+
+        return suppliers
 
     async def list_categories(self, *, page_size: int = 500) -> list[dict]:
         """Return all product categories. X-Series supports hierarchy via
@@ -375,11 +425,12 @@ class LightspeedClient:
     async def search_suppliers(self, query: str) -> list[dict]:
         """Substring search over supplier names. Case- and space-insensitive.
         Returns all suppliers whose name contains the query."""
-        normalized = "".join(query.lower().split())
+        normalized = _norm_supplier_name(query)
         suppliers = await self.list_suppliers()
         return [
             s for s in suppliers
-            if normalized in "".join(s.get("name", "").lower().split())
+            if normalized in _norm_supplier_name(s.get("name"))
+            or _norm_supplier_name(s.get("name")) in normalized
         ]
 
     async def find_supplier_by_name(self, name: str) -> dict | None:
@@ -387,12 +438,9 @@ class LightspeedClient:
         Look up a supplier by name. Lightspeed's supplier list is small
         enough to scan client-side; the API doesn't expose a name filter.
         """
-        # /suppliers is paginated; for typical retailers (< few hundred
-        # suppliers) one page is enough. If you exceed that, add pagination.
-        data = await self._request("GET", "/suppliers", params={"page_size": 200})
-        needle = name.strip().lower()
-        for supplier in data.get("data", []):
-            if supplier.get("name", "").strip().lower() == needle:
+        needle = _norm_supplier_name(name)
+        for supplier in await self.list_suppliers():
+            if _norm_supplier_name(supplier.get("name")) == needle:
                 return supplier
         return None
 

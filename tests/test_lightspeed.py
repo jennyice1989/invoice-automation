@@ -168,6 +168,47 @@ async def test_list_products_walks_all_pages(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_list_suppliers_walks_all_pages(client_factory):
+    seen_after: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        if after is None:
+            return httpx.Response(200, json={"data": [
+                {"id": "s1", "name": "First", "version": 10},
+                {"id": "s2", "name": "Second", "version": 11},
+            ]})
+        if after == "11":
+            return httpx.Response(200, json={"data": [
+                {"id": "s3", "name": "Third", "version": 12},
+            ]})
+        return httpx.Response(200, json={"data": []})
+
+    client = client_factory(handler)
+    suppliers = await client.list_suppliers(page_size=2)
+
+    assert [s["id"] for s in suppliers] == ["s1", "s2", "s3"]
+    assert seen_after == [None, "11"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_find_supplier_by_name_normalizes_punctuation_and_suffix(client_factory):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "wrong", "name": "Aquatic Wholesale"},
+            {"id": "right", "name": "Xtreme Aquatic Foods Inc"},
+        ]})
+
+    client = client_factory(handler)
+    supplier = await client.find_supplier_by_name("XTREME AQUATIC FOODS, INC.")
+
+    assert supplier["id"] == "right"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_search_products_ranks_full_catalog_locally(client_factory):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [
