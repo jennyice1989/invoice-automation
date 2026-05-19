@@ -394,6 +394,28 @@ class MatchingService:
                         confidence=1.0,
                     )
 
+        # Tier 2.6: exact supplier_code lookup in Lightspeed. The local
+        # catalog list endpoint may omit supplier_code on some accounts, but
+        # Lightspeed can still filter by it. This is a high-confidence signal
+        # and should run before any fuzzy-name matching.
+        if line.supplier_code:
+            try:
+                product = await self.ls.find_product_by_supplier_code(
+                    line.supplier_code
+                )
+            except LightspeedError as exc:
+                logger.warning("Supplier-code lookup failed: %s", exc)
+                product = None
+            if product:
+                return MatchedLine(
+                    raw=line,
+                    product_id=product["id"],
+                    product_sku=product.get("sku"),
+                    product_name=product.get("name"),
+                    matched_by="supplier_code_live",
+                    confidence=1.0,
+                )
+
         # Tier 3: fuzzy name match against the full catalog (last resort).
         # We score by name similarity, then BOOST when the supplier_code's
         # numeric tail also appears in the product (in name, sku, or
