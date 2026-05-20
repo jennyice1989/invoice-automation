@@ -324,33 +324,51 @@ class LightspeedClient:
 
         return suppliers
 
-    async def list_categories(self, *, page_size: int = 500) -> list[dict]:
+    async def list_categories(
+        self,
+        *,
+        page_size: int = 500,
+        max_pages: int = 100,
+    ) -> list[dict]:
         """Return all product categories. X-Series supports hierarchy via
         category_path; categories are returned flat with parent references.
 
         Defensive against unexpected response shapes — logs and skips
         non-dict items rather than crashing the caller.
         """
-        data = await self._request(
-            "GET", "/product_categories", params={"page_size": page_size}
-        )
-        raw = data.get("data", [])
-        if not isinstance(raw, list):
-            logger.warning(
-                "Unexpected /product_categories shape: data is %s, not list. "
-                "Full response keys: %s",
-                type(raw).__name__, list(data.keys()) if isinstance(data, dict) else "n/a",
-            )
-            return []
         result = []
-        for item in raw:
-            if isinstance(item, dict):
-                result.append(item)
-            else:
-                logger.warning(
-                    "Skipping non-dict category item: %r (type %s)",
-                    item, type(item).__name__,
-                )
+        seen_ids: set[str] = set()
+        after: int | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"page_size": page_size}
+            if after is not None:
+                params["after"] = after
+            data = await self._request("GET", "/product_categories", params=params)
+            raw = data.get("data", []) if isinstance(data, dict) else []
+            if not isinstance(raw, list) or not raw:
+                break
+            for item in raw:
+                if isinstance(item, dict):
+                    category_id = item.get("id")
+                    if category_id and category_id in seen_ids:
+                        continue
+                    if category_id:
+                        seen_ids.add(category_id)
+                    result.append(item)
+                else:
+                    logger.warning(
+                        "Skipping non-dict category item: %r (type %s)",
+                        item, type(item).__name__,
+                    )
+            versions = [
+                int(item["version"]) for item in raw
+                if isinstance(item, dict)
+                and str(item.get("version", "")).isdigit()
+            ]
+            next_after = max(versions) if versions else None
+            if len(raw) < page_size or next_after is None or next_after == after:
+                break
+            after = next_after
         return result
 
     async def list_brands(self, *, page_size: int = 500) -> list[dict]:
@@ -359,6 +377,22 @@ class LightspeedClient:
             "GET", "/brands", params={"page_size": page_size}
         )
         return data.get("data", [])
+
+    async def create_brand(self, name: str) -> dict:
+        """Create a Lightspeed brand and normalize response wrappers."""
+        data = await self._request("POST", "/brands", json={"name": name})
+        inner = self._unwrap_product_response(data, context="brand create")
+        if isinstance(inner, dict):
+            return inner
+        if _UUID_RE.match(inner.strip()):
+            fetched = await self._request("GET", f"/brands/{inner.strip()}")
+            brand = self._unwrap_product_response(fetched, context="get brand")
+            if isinstance(brand, dict):
+                return brand
+        raise LightspeedError(
+            "Unexpected Lightspeed response during brand create: "
+            f"{type(inner).__name__}"
+        )
 
     async def list_tags(self, *, page_size: int = 500) -> list[dict]:
         data = await self._request(

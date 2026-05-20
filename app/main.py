@@ -249,7 +249,7 @@ async def list_categories_endpoint():
         if not isinstance(c, dict):
             logger.warning("Skipping non-dict category: %r", c)
             continue
-        if not c.get("leaf_category"):
+        if c.get("leaf_category") is False:
             continue
         path = c.get("category_path") or []
         if isinstance(path, list):
@@ -275,6 +275,18 @@ async def list_brands_endpoint():
     items = [{"id": b["id"], "name": b.get("name")} for b in brands if b.get("name")]
     items.sort(key=lambda x: (x["name"] or "").lower())
     return {"data": items}
+
+
+def _category_full_name(c: dict) -> str:
+    path = c.get("category_path") or []
+    if isinstance(path, list) and path:
+        full = " / ".join(
+            p.get("name", "") for p in path
+            if isinstance(p, dict) and p.get("name")
+        )
+        if full:
+            return full
+    return c.get("name") or ""
 
 
 @app.get("/catalog/status", dependencies=[Depends(require_auth)])
@@ -647,10 +659,16 @@ class LineDecision(BaseModel):
     retail_price_override: float | None = None  # for updating existing products
 
 
+class OrderCostIn(BaseModel):
+    label: str = "Additional cost"
+    amount: float
+
+
 class FinalizeRequest(BaseModel):
     invoice_id: int
     receive_immediately: bool = False
     update_costs_for_existing: bool = True
+    additional_costs: list[OrderCostIn] = Field(default_factory=list)
     # Decisions for uncertain/new lines, keyed by index into the uncertain list
     decisions: list[LineDecision] = Field(default_factory=list)
     # Per-matched-line retail price overrides, keyed by index into matched list
@@ -688,6 +706,25 @@ async def finalize_invoice(
     data = invoice.extraction_json or {}
     matched: list[dict] = list(data.get("matched", []))
     uncertain: list[dict] = list(data.get("uncertain", []))
+    additional_cost_total = sum(
+        max(0.0, float(c.amount)) for c in body.additional_costs
+        if c.amount is not None
+    )
+    base_item_total = 0.0
+    for m in matched:
+        base_item_total += float(m.get("quantity") or 0) * float(m.get("unit_cost") or 0)
+    for dec in body.decisions:
+        if dec.decision in {"match_existing", "create_new"}:
+            base_item_total += float(dec.quantity or 0) * float(dec.unit_cost or 0)
+
+    def _landed_unit_cost(quantity, unit_cost) -> float:
+        unit = float(unit_cost or 0)
+        qty = float(quantity or 0)
+        if not additional_cost_total or not base_item_total or not qty:
+            return unit
+        line_total = qty * unit
+        allocated = additional_cost_total * (line_total / base_item_total)
+        return round(unit + (allocated / qty), 4)
 
     items_for_lightspeed: list[MatchedLineItem] = []
     products_created: list[dict] = []
@@ -767,7 +804,8 @@ async def finalize_invoice(
                 upd = {}
                 if should_update_retail:
                     upd["retail_price"] = float(retail)
-                upd["supply_price"] = float(m["unit_cost"])
+                landed_cost = _landed_unit_cost(m["quantity"], m["unit_cost"])
+                upd["supply_price"] = landed_cost
                 result = await client.update_product(m["product_id"], **upd)
                 if result is None:
                     # Update was skipped (e.g., 404) — note it but proceed.
@@ -791,7 +829,8 @@ async def finalize_invoice(
                     products_updated.append({
                         "product_id": m["product_id"],
                         "name": m.get("product_name"),
-                        "new_supply_price": m["unit_cost"],
+                        "new_supply_price": landed_cost,
+                        "invoice_unit_cost": m["unit_cost"],
                         "new_retail_price": (
                             retail if should_update_retail else None
                         ),
@@ -807,7 +846,8 @@ async def finalize_invoice(
 
         items_for_lightspeed.append(MatchedLineItem(
             product_id=m["product_id"],
-            count=float(m["quantity"]), cost=float(m["unit_cost"]),
+            count=float(m["quantity"]),
+            cost=_landed_unit_cost(m["quantity"], m["unit_cost"]),
         ))
 
     # 2. Decisions for uncertain lines
@@ -849,7 +889,8 @@ async def finalize_invoice(
                         existing_retail,
                         dec.retail_price_override,
                     )
-                    upd = {"supply_price": dec.unit_cost}
+                    landed_cost = _landed_unit_cost(dec.quantity, dec.unit_cost)
+                    upd = {"supply_price": landed_cost}
                     if should_update_retail:
                         upd["retail_price"] = dec.retail_price_override
                     result = await client.update_product(
@@ -877,7 +918,8 @@ async def finalize_invoice(
                         products_updated.append({
                             "product_id": dec.lightspeed_product_id,
                             "name": dec.description,
-                            "new_supply_price": dec.unit_cost,
+                            "new_supply_price": landed_cost,
+                            "invoice_unit_cost": dec.unit_cost,
                             "new_retail_price": (
                                 dec.retail_price_override
                                 if should_update_retail else None
@@ -888,7 +930,8 @@ async def finalize_invoice(
 
             items_for_lightspeed.append(MatchedLineItem(
                 product_id=dec.lightspeed_product_id,
-                count=dec.quantity, cost=dec.unit_cost,
+                count=dec.quantity,
+                cost=_landed_unit_cost(dec.quantity, dec.unit_cost),
             ))
             continue
 
@@ -897,13 +940,14 @@ async def finalize_invoice(
                 errors.append("Skipped a create_new: no product name given")
                 continue
             try:
+                landed_cost = _landed_unit_cost(dec.quantity, dec.unit_cost)
                 created = await client.create_product(
                     name=dec.new_product_name,
                     sku=dec.new_product_sku,
                     supplier_id=invoice.supplier_id,
                     supplier_code=dec.supplier_code,
                     barcode=dec.barcode,
-                    supply_price=dec.unit_cost,
+                    supply_price=landed_cost,
                     retail_price=dec.new_retail_price,
                 )
                 new_id = created.get("id")
@@ -914,7 +958,8 @@ async def finalize_invoice(
                     continue
                 products_created.append({
                     "product_id": new_id, "name": dec.new_product_name,
-                    "sku": dec.new_product_sku, "supply_price": dec.unit_cost,
+                    "sku": dec.new_product_sku, "supply_price": landed_cost,
+                    "invoice_unit_cost": dec.unit_cost,
                     "retail_price": dec.new_retail_price,
                 })
                 await upsert_cached_product(session, created)
@@ -940,7 +985,9 @@ async def finalize_invoice(
                         status="linked",
                     )
                 items_for_lightspeed.append(MatchedLineItem(
-                    product_id=new_id, count=dec.quantity, cost=dec.unit_cost,
+                    product_id=new_id,
+                    count=dec.quantity,
+                    cost=landed_cost,
                 ))
             except LightspeedError as exc:
                 errors.append(f"Failed to create {dec.new_product_name}: {exc}")
@@ -1063,6 +1110,11 @@ async def finalize_invoice(
         "products_created": products_created,
         "products_updated": products_updated,
         "retail_price_report": retail_price_report,
+        "additional_costs": [
+            {"label": c.label, "amount": float(c.amount)}
+            for c in body.additional_costs
+        ],
+        "additional_cost_total": additional_cost_total,
         "skipped": skipped,
         "queued_for_enrichment_count": len(queued_for_enrichment),
         "enrichment_batch_id": enrichment_batch_id,
@@ -1522,17 +1574,10 @@ async def create_from_draft(
             for c in cats:
                 if not isinstance(c, dict):
                     continue
-                if not c.get("leaf_category"):
+                if c.get("leaf_category") is False:
                     continue
-                path = c.get("category_path") or []
-                if isinstance(path, list) and path:
-                    full = " / ".join(
-                        p.get("name", "") for p in path
-                        if isinstance(p, dict) and p.get("name")
-                    )
-                else:
-                    full = c.get("name") or ""
-                if full == draft.product_category:
+                full = _category_full_name(c)
+                if full == draft.product_category or c.get("id") == draft.product_category:
                     category_id = c["id"]
                     break
         except Exception as exc:
@@ -1540,13 +1585,32 @@ async def create_from_draft(
 
     # Resolve brand name to id
     brand_id = draft.brand_id
-    if not brand_id and draft.brand_name:
+    brand_name = draft.brand_name
+    if not brand_name and draft.supplier_id:
+        try:
+            suppliers = await client.list_suppliers()
+            supplier = next(
+                (s for s in suppliers if s.get("id") == draft.supplier_id),
+                None,
+            )
+            brand_name = (supplier or {}).get("name") or "Generic"
+        except Exception as exc:
+            logger.warning("Supplier brand fallback failed: %s", exc)
+            brand_name = "Generic"
+    if not brand_name:
+        brand_name = "Generic"
+
+    if not brand_id and brand_name:
         try:
             brands = await client.list_brands()
             for b in brands:
-                if (b.get("name") or "").strip().lower() == draft.brand_name.strip().lower():
+                if (b.get("name") or "").strip().lower() == brand_name.strip().lower():
                     brand_id = b["id"]
                     break
+            if not brand_id:
+                created_brand = await client.create_brand(brand_name.strip())
+                brand_id = created_brand.get("id")
+                brand_name = created_brand.get("name") or brand_name
         except Exception as exc:
             logger.warning("Brand resolve failed: %s", exc)
 
@@ -1597,6 +1661,7 @@ async def create_from_draft(
     draft.lightspeed_product_id = new_id
     draft.product_category_id = category_id
     draft.brand_id = brand_id
+    draft.brand_name = brand_name
     draft.error = None
     await upsert_cached_product(session, created)
 

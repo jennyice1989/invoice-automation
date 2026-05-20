@@ -231,6 +231,48 @@ async def test_list_suppliers_walks_all_pages(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_list_categories_walks_all_pages(client_factory):
+    seen_after: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        if after is None:
+            return httpx.Response(200, json={"data": [
+                {"id": "c1", "name": "Dry Goods", "version": 10},
+                {"id": "c2", "name": "Food", "version": 11},
+            ]})
+        if after == "11":
+            return httpx.Response(200, json={"data": [
+                {"id": "c3", "name": "Frozen", "version": 12},
+            ]})
+        return httpx.Response(200, json={"data": []})
+
+    client = client_factory(handler)
+    categories = await client.list_categories(page_size=2)
+
+    assert [c["id"] for c in categories] == ["c1", "c2", "c3"]
+    assert seen_after == [None, "11"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_brand_posts_name(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": {"id": "b1", "name": "Generic"}})
+
+    client = client_factory(handler)
+    brand = await client.create_brand("Generic")
+
+    assert captured["body"] == {"name": "Generic"}
+    assert brand["id"] == "b1"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_find_supplier_by_name_normalizes_punctuation_and_suffix(client_factory):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [

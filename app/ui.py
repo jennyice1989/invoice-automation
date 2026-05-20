@@ -336,6 +336,7 @@ const INVOICE_ID = {{INVOICE_ID}};
 let DATA = null;
 let DECISIONS = {};      // index in uncertain[] -> decision object
 let MATCHED_PRICE_OVERRIDES = {};  // index in matched[] -> retail price
+let ORDER_COSTS = [];
 
 (async () => {
   const resp = await fetch('/invoices/' + INVOICE_ID);
@@ -472,6 +473,13 @@ function render() {
          + 'Mark RECEIVED immediately (updates inventory)</label>'
          + '<label class="opt"><input type="checkbox" id="updateCosts" checked />'
          + 'Update cost + retail on matched products</label>'
+         + '<div style="flex-basis:100%;display:flex;gap:8px;align-items:end;flex-wrap:wrap">'
+         + '<label style="font-size:12px;color:var(--muted)">Freight / extra cost'
+         + '<input id="extraLabel" type="text" value="Freight" style="display:block;margin-top:4px" /></label>'
+         + '<label style="font-size:12px;color:var(--muted)">Amount'
+         + '<input id="extraAmount" type="number" step="0.01" placeholder="0.00" style="display:block;margin-top:4px;width:110px" /></label>'
+         + '<button class="cand-btn" type="button" onclick="addOrderCost()">Add cost</button>'
+         + '<span id="orderCostsView"></span></div>'
          + '<span class="grow"></span>'
          + '<button class="primary" id="finalBtn" onclick="finalize()">'
          + 'Push to Lightspeed</button></div>'
@@ -480,6 +488,7 @@ function render() {
 
   document.getElementById('content').innerHTML = html;
   updateFinalButton();
+  renderOrderCosts();
 }
 
 function renderMatchedRow(m, i, locked) {
@@ -531,7 +540,8 @@ function renderUncertainRow(u, i, locked) {
       }
     }
     buttons += '<button class="cand-btn" onclick="openSearch(' + i + ')">Search...</button>';
-    buttons += '<button class="cand-btn" onclick="openCreateNew(' + i + ')">Create new</button>';
+    buttons += '<button class="cand-btn" onclick="queueNew(' + i + ',\\'dry_good\\')">New dry good</button>';
+    buttons += '<button class="cand-btn" onclick="queueNew(' + i + ',\\'live_fish\\')">New fish</button>';
     buttons += '<button class="cand-btn" onclick="skipUncertain(' + i + ')">Skip</button>';
     controls = '<div class="decision">' + buttons + '</div>';
   }
@@ -580,28 +590,38 @@ async function openSearch(i) {
   matchExisting(i, match.id, match.name);
 }
 
-function openCreateNew(i) {
+function queueNew(i, kindHint) {
   // Queue this line for enrichment. The actual product creation happens
   // on the enrichment review screen after finalize.
   const u = DATA.data.uncertain[i];
-  const kindHint = prompt(
-    'Type? Press Enter to auto-detect. Otherwise type "dry" for dry good '
-    + 'or "fish" for live fish:',
-    ''
-  );
-  let normalized = null;
-  if (kindHint) {
-    const t = kindHint.trim().toLowerCase();
-    if (t.startsWith('d') || t === 'dry_good') normalized = 'dry_good';
-    else if (t.startsWith('f') || t === 'live_fish') normalized = 'live_fish';
-  }
   DECISIONS[i] = {
     decision: 'queue_enrich',
     supplier_code: u.supplier_code, description: u.description,
     barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
-    kind_hint: normalized,
+    kind_hint: kindHint,
   };
   render();
+}
+
+function addOrderCost() {
+  const label = document.getElementById('extraLabel').value.trim() || 'Additional cost';
+  const amount = parseFloat(document.getElementById('extraAmount').value);
+  if (!amount || amount < 0) return;
+  ORDER_COSTS.push({ label, amount });
+  document.getElementById('extraAmount').value = '';
+  renderOrderCosts();
+}
+function removeOrderCost(i) { ORDER_COSTS.splice(i, 1); renderOrderCosts(); }
+function renderOrderCosts() {
+  const el = document.getElementById('orderCostsView');
+  if (!el) return;
+  if (!ORDER_COSTS.length) { el.innerHTML = ''; return; }
+  const total = ORDER_COSTS.reduce((s, c) => s + c.amount, 0);
+  el.innerHTML = ORDER_COSTS.map((c, i) =>
+    '<span class="badge" style="margin-right:4px">' + escape(c.label) + ' '
+    + fmtMoney(c.amount) + ' <button type="button" onclick="removeOrderCost(' + i
+    + ')" style="border:0;background:transparent;cursor:pointer">×</button></span>'
+  ).join('') + '<small style="color:var(--muted)"> total ' + fmtMoney(total) + '</small>';
 }
 
 function queueAllUnresolved() {
@@ -651,6 +671,7 @@ async function finalize() {
     invoice_id: INVOICE_ID,
     receive_immediately: document.getElementById('receive').checked,
     update_costs_for_existing: document.getElementById('updateCosts').checked,
+    additional_costs: ORDER_COSTS,
     decisions: Object.values(DECISIONS),
     matched_overrides: MATCHED_PRICE_OVERRIDES,
   };
@@ -672,6 +693,8 @@ async function finalize() {
       }
       if (data.products_created.length) h += '<br>Created ' + data.products_created.length + ' new products.';
       if (data.products_updated.length) h += '<br>Updated ' + data.products_updated.length + ' existing products.';
+      if (data.additional_cost_total) h += '<br>Allocated additional costs into landed item costs: '
+        + fmtMoney(data.additional_cost_total) + '.';
       if (data.retail_price_report && data.retail_price_report.length) {
         const changed = data.retail_price_report.filter(r => r.changed);
         const skipped = data.retail_price_report.filter(r => !r.changed);
