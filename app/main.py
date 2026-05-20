@@ -19,7 +19,7 @@ from fastapi import (
 )
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import (
@@ -35,8 +35,8 @@ from app.catalog import (
     upsert_cached_product,
 )
 from app.db import (
-    EnrichmentDraft,
-    Invoice, InvoiceLine, PricingRule, SupplierMsrp, SupplierSkuMapping,
+    EnrichmentDraft, Invoice, InvoiceLine, PricingRule, SupplierCatalogItem,
+    SupplierMsrp, SupplierSkuMapping,
     find_existing_invoice, init_db, session_scope, upsert_mapping,
 )
 from app.enrichment import (
@@ -52,7 +52,7 @@ from app.price_updates import float_or_none, retail_update_decision
 from app.pricing import PricingResult, price_line
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -199,6 +199,13 @@ async def settings_page(request: Request):
     return HTMLResponse(SETTINGS_HTML)
 
 
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(ADMIN_HTML)
+
+
 @app.get("/enrich", response_class=HTMLResponse)
 async def enrich_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
@@ -306,6 +313,152 @@ async def sync_catalog(session: AsyncSession = Depends(_session)):
         "upserted": result.upserted,
         "synced_at": result.synced_at.isoformat(),
     }
+
+
+# --------------------------------------------------------------------- #
+# Admin tools                                                           #
+# --------------------------------------------------------------------- #
+
+@app.get("/admin/status", dependencies=[Depends(require_auth)])
+async def admin_status(session: AsyncSession = Depends(_session)):
+    catalog = await catalog_status(session)
+    supplier_item_count = (await session.execute(
+        select(func.count(SupplierCatalogItem.id))
+    )).scalar_one()
+    mapping_count = (await session.execute(
+        select(func.count(SupplierSkuMapping.id))
+    )).scalar_one()
+    failed_invoice_count = (await session.execute(
+        select(func.count(Invoice.id)).where(
+            or_(Invoice.status == "FAILED", Invoice.error.is_not(None))
+        )
+    )).scalar_one()
+    return {
+        "catalog": catalog,
+        "supplier_item_count": supplier_item_count or 0,
+        "mapping_count": mapping_count or 0,
+        "failed_invoice_count": failed_invoice_count or 0,
+    }
+
+
+@app.get("/admin/errors", dependencies=[Depends(require_auth)])
+async def admin_errors(session: AsyncSession = Depends(_session), limit: int = 20):
+    rows = (await session.execute(
+        select(Invoice)
+        .where(or_(Invoice.status == "FAILED", Invoice.error.is_not(None)))
+        .order_by(Invoice.created_at.desc())
+        .limit(min(max(limit, 1), 100))
+    )).scalars().all()
+    return {"data": [{
+        "id": r.id,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "supplier_name": r.supplier_name,
+        "supplier_invoice_number": r.supplier_invoice_number,
+        "status": r.status,
+        "error": r.error,
+    } for r in rows]}
+
+
+@app.get("/admin/supplier-items", dependencies=[Depends(require_auth)])
+async def admin_supplier_items(
+    q: str = "",
+    session: AsyncSession = Depends(_session),
+    limit: int = 50,
+):
+    stmt = select(SupplierCatalogItem).order_by(
+        SupplierCatalogItem.updated_at.desc()
+    )
+    q = (q or "").strip()
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(or_(
+            func.lower(SupplierCatalogItem.supplier_name).like(like),
+            func.lower(SupplierCatalogItem.supplier_code).like(like),
+            func.lower(SupplierCatalogItem.description).like(like),
+            func.lower(SupplierCatalogItem.lightspeed_product_id).like(like),
+            func.lower(SupplierCatalogItem.status).like(like),
+        ))
+    rows = (await session.execute(
+        stmt.limit(min(max(limit, 1), 200))
+    )).scalars().all()
+    return {"data": [{
+        "id": r.id,
+        "supplier_id": r.supplier_id,
+        "supplier_name": r.supplier_name,
+        "supplier_code": r.supplier_code,
+        "description": r.description,
+        "barcode": r.barcode,
+        "lightspeed_product_id": r.lightspeed_product_id,
+        "status": r.status,
+        "last_unit_cost": r.last_unit_cost,
+        "seen_count": r.seen_count,
+        "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    } for r in rows]}
+
+
+@app.post("/admin/supplier-items/{item_id}/unlink", dependencies=[Depends(require_auth)])
+async def admin_unlink_supplier_item(
+    item_id: int,
+    session: AsyncSession = Depends(_session),
+):
+    row = (await session.execute(
+        select(SupplierCatalogItem).where(SupplierCatalogItem.id == item_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "Supplier item not found")
+    row.lightspeed_product_id = None
+    row.status = "needs_product"
+    row.updated_at = datetime.utcnow()
+    return {"ok": True}
+
+
+@app.get("/admin/mappings", dependencies=[Depends(require_auth)])
+async def admin_mappings(
+    q: str = "",
+    session: AsyncSession = Depends(_session),
+    limit: int = 50,
+):
+    stmt = select(SupplierSkuMapping).order_by(
+        SupplierSkuMapping.updated_at.desc()
+    )
+    q = (q or "").strip()
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(or_(
+            func.lower(SupplierSkuMapping.supplier_id).like(like),
+            func.lower(SupplierSkuMapping.supplier_code).like(like),
+            func.lower(SupplierSkuMapping.lightspeed_product_id).like(like),
+            func.lower(SupplierSkuMapping.lightspeed_sku).like(like),
+            func.lower(SupplierSkuMapping.product_name).like(like),
+        ))
+    rows = (await session.execute(
+        stmt.limit(min(max(limit, 1), 200))
+    )).scalars().all()
+    return {"data": [{
+        "id": r.id,
+        "supplier_id": r.supplier_id,
+        "supplier_code": r.supplier_code,
+        "lightspeed_product_id": r.lightspeed_product_id,
+        "lightspeed_sku": r.lightspeed_sku,
+        "product_name": r.product_name,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    } for r in rows]}
+
+
+@app.delete("/admin/mappings/{mapping_id}", dependencies=[Depends(require_auth)])
+async def admin_delete_mapping(
+    mapping_id: int,
+    session: AsyncSession = Depends(_session),
+):
+    row = (await session.execute(
+        select(SupplierSkuMapping).where(SupplierSkuMapping.id == mapping_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "Mapping not found")
+    await session.delete(row)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------- #

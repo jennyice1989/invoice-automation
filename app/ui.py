@@ -86,6 +86,7 @@ _NAV = """<nav>
 <a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
+<a href="/admin" id="nav-admin">Admin</a>
 <span class="grow"></span>
 <form action="/logout" method="post"><button class="logout" type="submit">Sign out</button></form>
 </nav>"""
@@ -946,6 +947,163 @@ function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => 
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 loadRules(); loadSuppliers();
+</script>
+</body></html>"""
+
+
+ADMIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Admin tools</title>
+<style>""" + _COMMON_CSS + """
+.tools-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 800px) { .tools-grid { grid-template-columns: 1fr; } }
+.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.toolbar input { max-width:320px; }
+.danger { color: var(--bad); border-color:#fecaca; }
+.muted { color: var(--muted); }
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-admin">Admin<', 'id="nav-admin" class="active">Admin<') + """
+  <h1>Admin tools</h1>
+  <p class="subtitle">Catalog sync, learned-match cleanup, and failure triage.</p>
+
+  <div class="tools-grid">
+    <div class="card">
+      <h2>Catalog</h2>
+      <div id="catalogStatus" class="muted">Loading...</div>
+      <div style="margin-top:12px">
+        <button class="primary" onclick="syncCatalog()">Sync catalog now</button>
+      </div>
+      <div id="syncResult" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Recent errors</h2>
+      <div id="errorsBox" class="muted">Loading...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Supplier item memory</h2>
+    <div class="toolbar">
+      <input id="memoryQ" type="text" placeholder="Search code, description, supplier, product id" />
+      <button class="secondary" onclick="loadMemory()">Search</button>
+    </div>
+    <div id="memoryBox" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h2>Supplier SKU mappings</h2>
+    <div class="toolbar">
+      <input id="mappingQ" type="text" placeholder="Search supplier code, product name, product id" />
+      <button class="secondary" onclick="loadMappings()">Search</button>
+    </div>
+    <div id="mappingBox" class="muted">Loading...</div>
+  </div>
+</div>
+<script>
+async function api(url, opts) {
+  const resp = await fetch(url, opts || {});
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+async function loadStatus() {
+  const data = await api('/admin/status');
+  document.getElementById('catalogStatus').innerHTML =
+    '<div class="meta">'
+    + meta('Products cached', data.catalog.product_count)
+    + meta('Last synced', data.catalog.last_synced_at || 'never')
+    + meta('Supplier memory', data.supplier_item_count)
+    + meta('Mappings', data.mapping_count)
+    + meta('Failed invoices', data.failed_invoice_count)
+    + '</div>';
+}
+
+async function syncCatalog() {
+  const out = document.getElementById('syncResult');
+  out.innerHTML = '<span class="spinner"></span>Syncing...';
+  try {
+    const data = await api('/catalog/sync', { method: 'POST' });
+    out.innerHTML = '<div class="success">Synced ' + data.product_count + ' products.</div>';
+    loadStatus();
+  } catch (err) {
+    out.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+async function loadErrors() {
+  const data = await api('/admin/errors');
+  if (!data.data.length) {
+    document.getElementById('errorsBox').innerHTML = '<span class="muted">No stored failures.</span>';
+    return;
+  }
+  let h = '<table><thead><tr><th>When</th><th>Invoice</th><th>Status</th><th>Error</th></tr></thead><tbody>';
+  data.data.forEach(r => {
+    h += '<tr><td>' + escape(new Date(r.created_at).toLocaleString()) + '</td>'
+      + '<td><a href="/review/' + r.id + '">#' + r.id + '</a><br><small>'
+      + escape(r.supplier_name || '') + ' ' + escape(r.supplier_invoice_number || '') + '</small></td>'
+      + '<td>' + escape(r.status) + '</td>'
+      + '<td>' + escape(r.error || '') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('errorsBox').innerHTML = h;
+}
+
+async function loadMemory() {
+  const q = document.getElementById('memoryQ').value.trim();
+  const data = await api('/admin/supplier-items?q=' + encodeURIComponent(q));
+  let h = '<table><thead><tr><th>Supplier item</th><th>Status</th><th>Linked product</th><th>Seen</th><th></th></tr></thead><tbody>';
+  data.data.forEach(r => {
+    h += '<tr><td><strong>' + escape(r.supplier_code) + '</strong><br><small>'
+      + escape(r.supplier_name || '') + '</small><br>' + escape(r.description || '') + '</td>'
+      + '<td>' + escape(r.status || '') + '</td>'
+      + '<td>' + escape(r.lightspeed_product_id || 'not linked') + '</td>'
+      + '<td>' + (r.seen_count || 0) + '<br><small>' + escape(r.last_seen_at || '') + '</small></td>'
+      + '<td>' + (r.lightspeed_product_id
+        ? '<button class="secondary danger" onclick="unlinkItem(' + r.id + ')">Unlink</button>'
+        : '') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('memoryBox').innerHTML = data.data.length ? h : '<span class="muted">No rows.</span>';
+}
+
+async function unlinkItem(id) {
+  if (!confirm('Unlink this supplier item from its product?')) return;
+  await api('/admin/supplier-items/' + id + '/unlink', { method: 'POST' });
+  loadMemory();
+}
+
+async function loadMappings() {
+  const q = document.getElementById('mappingQ').value.trim();
+  const data = await api('/admin/mappings?q=' + encodeURIComponent(q));
+  let h = '<table><thead><tr><th>Supplier code</th><th>Product</th><th>Updated</th><th></th></tr></thead><tbody>';
+  data.data.forEach(r => {
+    h += '<tr><td>' + escape(r.supplier_code) + '<br><small>' + escape(r.supplier_id) + '</small></td>'
+      + '<td>' + escape(r.product_name || '') + '<br><small>' + escape(r.lightspeed_product_id || '') + '</small></td>'
+      + '<td>' + escape(r.updated_at || '') + '</td>'
+      + '<td><button class="secondary danger" onclick="deleteMapping(' + r.id + ')">Delete</button></td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('mappingBox').innerHTML = data.data.length ? h : '<span class="muted">No rows.</span>';
+}
+
+async function deleteMapping(id) {
+  if (!confirm('Delete this saved mapping?')) return;
+  await api('/admin/mappings/' + id, { method: 'DELETE' });
+  loadMappings();
+}
+
+function meta(label, value) {
+  return '<div><label>' + escape(label) + '</label><span>' + escape(value) + '</span></div>';
+}
+function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+
+loadStatus(); loadErrors(); loadMemory(); loadMappings();
 </script>
 </body></html>"""
 
