@@ -54,6 +54,7 @@ from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
     ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML,
 )
+from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1461,6 +1462,43 @@ async def upload_msrp(
 import uuid as _uuid
 
 
+def _append_draft_warning(draft: EnrichmentDraft, message: str):
+    warnings = list((draft.warnings or {}).get("list", []))
+    if message not in warnings:
+        warnings.append(message)
+    draft.warnings = {"list": warnings}
+
+
+def _upc_lookup_warning(result: UpcLookupResult) -> str:
+    product = f" ({result.product_name})" if result.product_name else ""
+    return (
+        f"UPC lookup found {result.upc} from {result.source}{product}; "
+        f"confidence {result.confidence:.2f}."
+    )
+
+
+async def _lookup_and_apply_draft_upc(
+    session: AsyncSession,
+    draft: EnrichmentDraft,
+    client,
+    *,
+    force: bool = False,
+) -> UpcLookupResult | None:
+    if draft.barcode and not force:
+        return None
+    result = await lookup_upc_for_product(
+        session,
+        client=client,
+        supplier_id=draft.supplier_id,
+        supplier_code=draft.supplier_code,
+        product_name=draft.final_name or draft.input_name,
+    )
+    if result:
+        draft.barcode = result.upc
+        _append_draft_warning(draft, _upc_lookup_warning(result))
+    return result
+
+
 async def _enrich_pending_drafts(batch_id: str):
     """Background task: draft content for every PENDING_ENRICH row in a
     batch, one at a time. Marks each DRAFT when done, or records error.
@@ -1513,6 +1551,11 @@ async def _enrich_pending_drafts(batch_id: str):
                 "dry_good", "live_fish", "live_invert", "live_plant", "live_coral"
             ) else None
             try:
+                if client and not draft.barcode:
+                    try:
+                        await _lookup_and_apply_draft_upc(session, draft, client)
+                    except Exception as exc:
+                        logger.warning("UPC lookup failed for draft %s: %s", draft.id, exc)
                 result = await enrich_product(
                     name,
                     supplier_code=draft.supplier_code,
@@ -1528,7 +1571,9 @@ async def _enrich_pending_drafts(batch_id: str):
                 draft.product_category = result.product_category
                 draft.brand_name = result.brand_name
                 draft.tags = {"list": result.suggested_tags} if result.suggested_tags else None
-                draft.warnings = {"list": result.warnings} if result.warnings else None
+                combined_warnings = list((draft.warnings or {}).get("list", []))
+                combined_warnings.extend(w for w in result.warnings if w not in combined_warnings)
+                draft.warnings = {"list": combined_warnings} if combined_warnings else None
                 draft.status = "DRAFT"
             except EnrichmentError as exc:
                 draft.error = str(exc)
@@ -1676,6 +1721,57 @@ async def update_draft(
         draft.tags = {"list": body.tags}
 
     return {"ok": True, "draft": _draft_to_dict(draft)}
+
+
+@app.post("/enrich/draft/{draft_id}/lookup-upc", dependencies=[Depends(require_auth)])
+async def lookup_draft_upc(
+    draft_id: int,
+    session: AsyncSession = Depends(_session),
+):
+    """Look up and apply a real UPC for supported supplier product drafts."""
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft.status == "CREATED":
+        raise HTTPException(409, "This product was already created")
+    if draft.barcode:
+        return {
+            "ok": True,
+            "message": "Draft already has a barcode.",
+            "draft": _draft_to_dict(draft),
+            "lookup": None,
+        }
+
+    client = _client()
+    try:
+        result = await _lookup_and_apply_draft_upc(session, draft, client)
+    except Exception as exc:
+        logger.warning("UPC lookup failed for draft %s: %s", draft.id, exc)
+        raise HTTPException(502, f"UPC lookup failed: {exc}")
+
+    if not result:
+        message = (
+            "No trusted UPC found. Lookup currently supports Central Pet, "
+            "Phillips Pet, and Reef H2O using existing catalog data."
+        )
+        _append_draft_warning(draft, message)
+        return {"ok": False, "message": message, "draft": _draft_to_dict(draft)}
+
+    return {
+        "ok": True,
+        "message": f"Found UPC {result.upc}.",
+        "lookup": {
+            "upc": result.upc,
+            "source": result.source,
+            "confidence": result.confidence,
+            "product_id": result.product_id,
+            "product_name": result.product_name,
+            "notes": result.notes,
+        },
+        "draft": _draft_to_dict(draft),
+    }
 
 
 @app.post("/enrich/draft/{draft_id}/reenrich", dependencies=[Depends(require_auth)])

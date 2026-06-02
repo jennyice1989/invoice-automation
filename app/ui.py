@@ -1260,6 +1260,9 @@ ENRICH_REVIEW_HTML = """<!DOCTYPE html>
   width: 100%; font: inherit; padding: 6px 8px;
   border: 1px solid var(--border); border-radius: 4px;
 }
+.field-action { display: flex; gap: 6px; align-items: center; }
+.field-action input { min-width: 0; }
+.field-action button { white-space: nowrap; padding: 6px 9px; }
 .field textarea { min-height: 60px; resize: vertical; }
 .field.uncertain input, .field.uncertain textarea {
   border-color: #f59e0b; background: #fffbeb;
@@ -1284,8 +1287,8 @@ ENRICH_REVIEW_HTML = """<!DOCTYPE html>
 <div class="container">
 """ + _NAV + """
   <h1>Review drafted products</h1>
-  <p class="subtitle">Edit anything that's wrong. UPC and photo are manual.
-  Yellow fields are ones Claude flagged as uncertain. Create pushes the
+  <p class="subtitle">Edit anything that's wrong. UPC lookup is available
+  for Central Pet, Phillips Pet, and Reef H2O drafts. Create pushes the
   product to Lightspeed.</p>
   <div id="content"><p style="color:var(--muted)">Loading...</p></div>
 </div>
@@ -1444,7 +1447,7 @@ function renderDraft(d) {
 
   // Codes
   html += field('SKU', 'sku', d.sku, d, dis);
-  html += field('Barcode / UPC', 'barcode', d.barcode, d, dis);
+  html += barcodeField(d, dis, locked);
   html += field('Supplier code', 'supplier_code', d.supplier_code, d, dis);
 
   // Pricing
@@ -1519,6 +1522,15 @@ function field(label, key, val, d, dis, full) {
     + '<input type="text" value="' + escAttr(val || '') + '"' + dis
     + ' onchange="upd(' + d.id + ',\\'' + key + '\\',this.value)" /></div>';
 }
+function barcodeField(d, dis, locked) {
+  const disabled = locked ? ' disabled' : '';
+  return '<div class="field"><label>Barcode / UPC</label><div class="field-action">'
+    + '<input type="text" value="' + escAttr(d.barcode || '') + '"' + dis
+    + ' onchange="upd(' + d.id + ',\\'barcode\\',this.value)" />'
+    + '<button class="secondary" id="upcbtn-' + d.id + '"' + disabled
+    + ' onclick="lookupUpc(' + d.id + ')">Lookup</button>'
+    + '</div></div>';
+}
 function numField(label, key, val, d, dis) {
   return '<div class="field"><label>' + label + '</label>'
     + '<input type="number" step="0.01" value="' + (val != null ? val : '') + '"' + dis
@@ -1571,6 +1583,29 @@ async function saveDraft(id, patch) {
       if (flash) { flash.textContent = 'saved'; setTimeout(() => flash.textContent = '', 1500); }
     }
   } catch (err) { console.warn('save failed', err); }
+}
+
+async function lookupUpc(id) {
+  const btn = document.getElementById('upcbtn-' + id);
+  if (btn) { btn.disabled = true; btn.textContent = 'Looking...'; }
+  try {
+    const resp = await fetch('/enrich/draft/' + id + '/lookup-upc', { method: 'POST' });
+    const data = await resp.json();
+    const i = DRAFTS.findIndex(x => x.id === id);
+    if (i >= 0 && data.draft) DRAFTS[i] = data.draft;
+    render();
+    const flash = document.getElementById('flash-' + id);
+    if (flash) {
+      flash.textContent = resp.ok && data.ok ? 'UPC found' : (data.message || 'No UPC found');
+      setTimeout(() => flash.textContent = '', 2200);
+    }
+    if (!resp.ok) alert(data.detail || data.message || 'UPC lookup failed');
+  } catch (err) {
+    alert('UPC lookup failed: ' + err.message);
+  } finally {
+    const nextBtn = document.getElementById('upcbtn-' + id);
+    if (nextBtn) { nextBtn.disabled = false; nextBtn.textContent = 'Lookup'; }
+  }
 }
 
 async function reenrich(id) {
