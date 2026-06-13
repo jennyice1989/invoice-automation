@@ -309,6 +309,7 @@ class EnrichmentDraft(Base):
     source_consignment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     source_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     source_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source_receive_immediately: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True
@@ -423,6 +424,7 @@ async def init_db() -> None:
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_consignment_id VARCHAR(64)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_cost DOUBLE PRECISION",
+            "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS source_receive_immediately BOOLEAN DEFAULT FALSE",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS product_category VARCHAR(255)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS product_category_id VARCHAR(64)",
             "ALTER TABLE enrichment_drafts ADD COLUMN IF NOT EXISTS brand_name VARCHAR(255)",

@@ -1002,6 +1002,7 @@ async def finalize_invoice(
             product_id=m["product_id"],
             count=float(m["quantity"]),
             cost=_landed_unit_cost(m["quantity"], m["unit_cost"]),
+            received=float(m["quantity"]) if body.receive_immediately else None,
         ))
 
     # 2. Decisions for uncertain lines
@@ -1086,6 +1087,7 @@ async def finalize_invoice(
                 product_id=dec.lightspeed_product_id,
                 count=dec.quantity,
                 cost=_landed_unit_cost(dec.quantity, dec.unit_cost),
+                received=dec.quantity if body.receive_immediately else None,
             ))
             continue
 
@@ -1142,6 +1144,7 @@ async def finalize_invoice(
                     product_id=new_id,
                     count=dec.quantity,
                     cost=landed_cost,
+                    received=dec.quantity if body.receive_immediately else None,
                 ))
             except LightspeedError as exc:
                 errors.append(f"Failed to create {dec.new_product_name}: {exc}")
@@ -1198,6 +1201,7 @@ async def finalize_invoice(
     items_failed = 0
     consignment_errors: list[str] = []
 
+    receive_now = body.receive_immediately and not queued_for_enrichment
     if items_for_lightspeed:
         try:
             result = await client.import_invoice(
@@ -1205,7 +1209,7 @@ async def finalize_invoice(
                 supplier_id=invoice.supplier_id,
                 supplier_invoice_number=invoice.supplier_invoice_number,
                 items=items_for_lightspeed,
-                receive_immediately=body.receive_immediately,
+                receive_immediately=receive_now,
                 name=f"Invoice {invoice.supplier_invoice_number}",
             )
         except LightspeedError as exc:
@@ -1238,6 +1242,7 @@ async def finalize_invoice(
                 source_consignment_id=consignment_id,
                 source_quantity=q["quantity"],
                 source_cost=q["unit_cost"],
+                source_receive_immediately=body.receive_immediately,
             )
             session.add(draft)
 
@@ -1477,6 +1482,139 @@ def _upc_lookup_warning(result: UpcLookupResult) -> str:
     )
 
 
+async def _outlet_id_for_client(client) -> str | None:
+    outlet_id = DEFAULT_OUTLET_ID
+    if outlet_id:
+        return outlet_id
+    outlets = await client.list_outlets()
+    return outlets[0]["id"] if outlets else None
+
+
+async def _source_consignment_status(client, consignment_id: str | None) -> str | None:
+    if not consignment_id:
+        return None
+    try:
+        consignment = await client.get_consignment(consignment_id)
+        return (consignment or {}).get("status")
+    except LightspeedError as exc:
+        logger.warning("Could not fetch consignment %s: %s", consignment_id, exc)
+        return None
+
+
+async def _receive_source_consignment_if_ready(
+    session: AsyncSession,
+    draft: EnrichmentDraft,
+    client,
+) -> bool:
+    if not draft.source_receive_immediately:
+        return False
+    if not draft.source_invoice_id or not draft.source_consignment_id:
+        return False
+
+    remaining = (await session.execute(
+        select(func.count(EnrichmentDraft.id))
+        .where(EnrichmentDraft.source_invoice_id == draft.source_invoice_id)
+        .where(EnrichmentDraft.status.notin_(("CREATED", "SKIPPED")))
+    )).scalar_one()
+    if remaining:
+        return False
+
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == draft.source_invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        return False
+
+    status = await _source_consignment_status(client, draft.source_consignment_id)
+    if status == "RECEIVED":
+        return False
+
+    outlet_id = await _outlet_id_for_client(client)
+    if not outlet_id:
+        _append_draft_warning(
+            draft,
+            "All draft items are resolved, but no outlet_id was available to "
+            "mark the consignment received.",
+        )
+        return False
+
+    name = f"Invoice {invoice.supplier_invoice_number}"
+    try:
+        if status != "DISPATCHED":
+            await client.update_consignment_status(
+                draft.source_consignment_id,
+                status="DISPATCHED",
+                outlet_id=outlet_id,
+                name=name,
+            )
+        await client.update_consignment_status(
+            draft.source_consignment_id,
+            status="RECEIVED",
+            outlet_id=outlet_id,
+            name=name,
+        )
+        invoice.status = "IMPORTED"
+        return True
+    except LightspeedError as exc:
+        _append_draft_warning(
+            draft,
+            f"Added the product to consignment {draft.source_consignment_id}, "
+            f"but failed to receive the consignment: {exc}. Receive it "
+            f"manually in Lightspeed to update inventory.",
+        )
+        return False
+
+
+async def _create_received_followup_consignment(
+    session: AsyncSession,
+    draft: EnrichmentDraft,
+    client,
+    product_id: str,
+) -> str | None:
+    if not draft.source_invoice_id or not draft.source_quantity:
+        return None
+    invoice = (await session.execute(
+        select(Invoice).where(Invoice.id == draft.source_invoice_id)
+    )).scalar_one_or_none()
+    if not invoice:
+        return None
+    outlet_id = await _outlet_id_for_client(client)
+    if not outlet_id:
+        return None
+    name = f"Invoice {invoice.supplier_invoice_number} - new products"
+    consignment = await client.create_consignment(
+        name=name,
+        outlet_id=outlet_id,
+        supplier_id=invoice.supplier_id,
+        supplier_invoice=invoice.supplier_invoice_number,
+    )
+    consignment_id = consignment.get("id")
+    if not consignment_id:
+        return None
+    await client.add_product_to_consignment(
+        consignment_id,
+        MatchedLineItem(
+            product_id=product_id,
+            count=float(draft.source_quantity),
+            cost=float(draft.source_cost or draft.supply_price or 0),
+            received=float(draft.source_quantity),
+        ),
+    )
+    await client.update_consignment_status(
+        consignment_id,
+        status="DISPATCHED",
+        outlet_id=outlet_id,
+        name=name,
+    )
+    await client.update_consignment_status(
+        consignment_id,
+        status="RECEIVED",
+        outlet_id=outlet_id,
+        name=name,
+    )
+    return consignment_id
+
+
 async def _lookup_and_apply_draft_upc(
     session: AsyncSession,
     draft: EnrichmentDraft,
@@ -1672,6 +1810,7 @@ def _draft_to_dict(d: EnrichmentDraft) -> dict:
         "source_invoice_id": d.source_invoice_id,
         "source_consignment_id": d.source_consignment_id,
         "source_quantity": d.source_quantity,
+        "source_receive_immediately": d.source_receive_immediately,
     }
 
 
@@ -1928,11 +2067,7 @@ async def create_from_draft(
             if invoice.consignment_id:
                 draft.source_consignment_id = invoice.consignment_id
             elif invoice.supplier_invoice_number:
-                outlet_id = DEFAULT_OUTLET_ID
-                if not outlet_id:
-                    outlets = await client.list_outlets()
-                    if outlets:
-                        outlet_id = outlets[0]["id"]
+                outlet_id = await _outlet_id_for_client(client)
                 if outlet_id:
                     try:
                         consignment = await client.create_consignment(
@@ -1956,16 +2091,42 @@ async def create_from_draft(
 
     if draft.source_consignment_id and draft.source_quantity:
         try:
-            from app.lightspeed import MatchedLineItem
-            await client.add_product_to_consignment(
-                draft.source_consignment_id,
-                MatchedLineItem(
-                    product_id=new_id,
-                    count=float(draft.source_quantity),
-                    cost=float(draft.source_cost or draft.supply_price or 0),
-                ),
-            )
-            added_to_consignment = True
+            status = await _source_consignment_status(client, draft.source_consignment_id)
+            if status == "RECEIVED":
+                followup_id = await _create_received_followup_consignment(
+                    session,
+                    draft,
+                    client,
+                    new_id,
+                )
+                if not followup_id:
+                    raise LightspeedError(
+                        "Original consignment is already RECEIVED and a "
+                        "follow-up consignment could not be created."
+                    )
+                draft.source_consignment_id = followup_id
+                added_to_consignment = True
+                _append_draft_warning(
+                    draft,
+                    "The original invoice consignment was already received, "
+                    f"so this product was received on follow-up consignment {followup_id}.",
+                )
+            else:
+                received_qty = (
+                    float(draft.source_quantity)
+                    if draft.source_receive_immediately else None
+                )
+                await client.add_product_to_consignment(
+                    draft.source_consignment_id,
+                    MatchedLineItem(
+                        product_id=new_id,
+                        count=float(draft.source_quantity),
+                        cost=float(draft.source_cost or draft.supply_price or 0),
+                        received=received_qty,
+                    ),
+                )
+                added_to_consignment = True
+                await _receive_source_consignment_if_ready(session, draft, client)
         except LightspeedError as exc:
             warns = (draft.warnings or {}).get("list", [])
             warns.append(
@@ -2015,6 +2176,15 @@ async def skip_draft(
         raise HTTPException(404, "Draft not found")
     if draft.status != "CREATED":
         draft.status = "SKIPPED"
+        if draft.source_receive_immediately and draft.source_consignment_id:
+            try:
+                await _receive_source_consignment_if_ready(session, draft, _client())
+            except Exception as exc:
+                logger.warning(
+                    "Could not receive source consignment after skipping draft %s: %s",
+                    draft.id,
+                    exc,
+                )
     return {"ok": True}
 
 

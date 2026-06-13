@@ -745,9 +745,10 @@ class LightspeedClient:
         brand_id: str | None = None,
         category_id: str | None = None,
         tag_ids: list[str] | None = None,
+        has_inventory: bool = True,
     ) -> dict:
         """Create a product in Lightspeed. Returns the new product dict."""
-        payload: dict[str, Any] = {"name": name}
+        payload: dict[str, Any] = {"name": name, "has_inventory": has_inventory}
         if sku:
             payload["sku"] = sku
         if supplier_id:
