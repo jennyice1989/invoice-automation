@@ -123,6 +123,11 @@ class SupplierCatalogItem(Base):
     supplier_code: Mapped[str] = mapped_column(String(255), index=True)
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     barcode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    mfg_part: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    list_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    catalog_source: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    catalog_page: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    facts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     lightspeed_product_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="needs_product", index=True)
     last_unit_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -412,6 +417,11 @@ async def init_db() -> None:
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS description VARCHAR(500)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(64)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS mfg_part VARCHAR(255)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS list_price DOUBLE PRECISION",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS catalog_source VARCHAR(500)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS catalog_page VARCHAR(64)",
+            "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS facts JSONB",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS lightspeed_product_id VARCHAR(64)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'needs_product'",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS last_unit_cost DOUBLE PRECISION",

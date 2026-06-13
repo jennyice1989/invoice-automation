@@ -985,6 +985,18 @@ ADMIN_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <h2>Supplier catalog PDFs</h2>
+    <div class="toolbar">
+      <select id="catalogSupplier"></select>
+      <input id="catalogFiles" type="file" multiple accept="application/pdf" />
+      <button class="primary" onclick="uploadCatalog()">Import PDFs</button>
+    </div>
+    <div id="catalogUploadResult" class="muted">
+      Import Central Pet, Phillips Pet, or Reef H2O catalog PDFs to improve UPC lookup and product descriptions.
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Supplier item memory</h2>
     <div class="toolbar">
       <input id="memoryQ" type="text" placeholder="Search code, description, supplier, product id" />
@@ -1029,6 +1041,49 @@ async function syncCatalog() {
     const data = await api('/catalog/sync', { method: 'POST' });
     out.innerHTML = '<div class="success">Synced ' + data.product_count + ' products.</div>';
     loadStatus();
+  } catch (err) {
+    out.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+async function loadSupplierOptions() {
+  const resp = await fetch('/suppliers');
+  const data = await resp.json();
+  const sel = document.getElementById('catalogSupplier');
+  const suppliers = resp.ok ? (data.data || []) : [];
+  sel.innerHTML = suppliers.map(s =>
+    '<option value="' + escAttr(s.id) + '">' + escape(s.name) + '</option>'
+  ).join('');
+}
+
+async function uploadCatalog() {
+  const out = document.getElementById('catalogUploadResult');
+  const supplierId = document.getElementById('catalogSupplier').value;
+  const files = document.getElementById('catalogFiles').files;
+  if (!supplierId) { out.innerHTML = '<div class="error">Pick a supplier first.</div>'; return; }
+  if (!files.length) { out.innerHTML = '<div class="error">Choose at least one PDF.</div>'; return; }
+  const form = new FormData();
+  form.append('supplier_id', supplierId);
+  for (const f of files) form.append('files', f);
+  out.innerHTML = '<span class="spinner"></span>Importing ' + files.length + ' PDF(s)...';
+  try {
+    const resp = await fetch('/admin/catalog/upload', { method: 'POST', body: form });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    let h = '<div class="success">Imported ' + data.imported + ' supplier catalog item(s).</div>';
+    if (data.files && data.files.length) {
+      h += '<table><thead><tr><th>File</th><th>Items</th></tr></thead><tbody>';
+      data.files.forEach(f => {
+        h += '<tr><td>' + escape(f.filename) + '</td><td>' + f.items + '</td></tr>';
+      });
+      h += '</tbody></table>';
+    }
+    if (data.errors && data.errors.length) {
+      h += '<div class="error">' + data.errors.map(escape).join('<br>') + '</div>';
+    }
+    out.innerHTML = h;
+    loadStatus();
+    loadMemory();
   } catch (err) {
     out.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
   }
@@ -1102,8 +1157,9 @@ function meta(label, value) {
 function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
+function escAttr(s) { return escape(s); }
 
-loadStatus(); loadErrors(); loadMemory(); loadMappings();
+loadStatus(); loadSupplierOptions(); loadErrors(); loadMemory(); loadMappings();
 </script>
 </body></html>"""
 

@@ -128,6 +128,7 @@ def _build_prompt(
     kind_hint: ProductKind | None,
     available_categories: list[str],
     available_brands: list[str],
+    product_facts: str | None = None,
 ) -> str:
     cat_list = "\n".join(f"  - {c}" for c in available_categories) or "  (none provided)"
     brand_list = ", ".join(available_brands[:80]) if available_brands else "(none provided)"
@@ -143,6 +144,11 @@ def _build_prompt(
         extra.append(f"Wholesale cost: ${supply_price:.2f}")
     if kind_hint and kind_hint != "unknown":
         extra.append(f"Product type (already classified): {kind_hint}")
+    if product_facts:
+        extra.append(
+            "Trusted supplier/catalog facts. Use these facts when writing the "
+            f"name and description; do not contradict them:\n{product_facts}"
+        )
     extras = ("\n" + "\n".join(extra)) if extra else ""
 
     return f"""You are enriching a product for a specialty aquarium retailer's online catalog.
@@ -201,6 +207,7 @@ async def enrich_product(
     kind_hint: ProductKind | None = None,
     available_categories: list[str] | None = None,
     available_brands: list[str] | None = None,
+    product_facts: str | None = None,
 ) -> EnrichmentResult:
     """Enrich a single product."""
     if not ANTHROPIC_API_KEY:
@@ -217,6 +224,7 @@ async def enrich_product(
         kind_hint=kind_hint,
         available_categories=available_categories or [],
         available_brands=available_brands or [],
+        product_facts=product_facts,
     )
 
     payload = {
@@ -272,6 +280,7 @@ async def enrich_batch(
                 kind_hint=p.get("kind_hint"),
                 available_categories=available_categories,
                 available_brands=available_brands,
+                product_facts=p.get("product_facts"),
             )
         except EnrichmentError as exc:
             r = EnrichmentResult(

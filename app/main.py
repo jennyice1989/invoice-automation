@@ -50,6 +50,13 @@ from app.lightspeed import (
 from app.matching import MatchingService, RawInvoiceLine
 from app.price_updates import float_or_none, retail_update_decision
 from app.pricing import PricingResult, price_line
+from app.supplier_catalog import (
+    extract_pdf_text,
+    find_supplier_catalog_item,
+    parse_supplier_catalog_text,
+    supplier_catalog_facts_text,
+    upsert_supplier_catalog_items,
+)
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
     ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML,
@@ -389,6 +396,11 @@ async def admin_supplier_items(
         "supplier_code": r.supplier_code,
         "description": r.description,
         "barcode": r.barcode,
+        "mfg_part": r.mfg_part,
+        "list_price": r.list_price,
+        "catalog_source": r.catalog_source,
+        "catalog_page": r.catalog_page,
+        "facts": r.facts or {},
         "lightspeed_product_id": r.lightspeed_product_id,
         "status": r.status,
         "last_unit_cost": r.last_unit_cost,
@@ -412,6 +424,54 @@ async def admin_unlink_supplier_item(
     row.status = "needs_product"
     row.updated_at = datetime.utcnow()
     return {"ok": True}
+
+
+@app.post("/admin/catalog/upload", dependencies=[Depends(require_auth)])
+async def admin_upload_supplier_catalog(
+    supplier_id: Annotated[str, Form(...)],
+    files: Annotated[list[UploadFile], File(...)],
+    session: AsyncSession = Depends(_session),
+):
+    if not files:
+        raise HTTPException(400, "Upload at least one PDF")
+    supplier_name = None
+    try:
+        suppliers = await _client().list_suppliers()
+        supplier = next((s for s in suppliers if s.get("id") == supplier_id), None)
+        supplier_name = (supplier or {}).get("name")
+    except Exception as exc:
+        logger.warning("Could not resolve supplier name for catalog import: %s", exc)
+
+    imported = 0
+    parsed_files = []
+    errors = []
+    for file in files:
+        filename = file.filename or "catalog.pdf"
+        if not filename.lower().endswith(".pdf"):
+            errors.append(f"{filename}: skipped because it is not a PDF")
+            continue
+        try:
+            content = await file.read()
+            text = extract_pdf_text(content)
+            items = parse_supplier_catalog_text(text, source=filename)
+            added = await upsert_supplier_catalog_items(
+                session,
+                supplier_id=supplier_id,
+                supplier_name=supplier_name,
+                items=items,
+            )
+            imported += added
+            parsed_files.append({"filename": filename, "items": added})
+        except Exception as exc:
+            logger.exception("Supplier catalog import failed for %s", filename)
+            errors.append(f"{filename}: {exc}")
+
+    return {
+        "ok": True,
+        "imported": imported,
+        "files": parsed_files,
+        "errors": errors,
+    }
 
 
 @app.get("/admin/mappings", dependencies=[Depends(require_auth)])
@@ -1694,6 +1754,26 @@ async def _enrich_pending_drafts(batch_id: str):
                         await _lookup_and_apply_draft_upc(session, draft, client)
                     except Exception as exc:
                         logger.warning("UPC lookup failed for draft %s: %s", draft.id, exc)
+                catalog_facts = None
+                try:
+                    catalog_item = await find_supplier_catalog_item(
+                        session,
+                        supplier_id=draft.supplier_id,
+                        supplier_code=draft.supplier_code,
+                        barcode=draft.barcode,
+                        product_name=name,
+                    )
+                    catalog_facts = supplier_catalog_facts_text(catalog_item)
+                    if catalog_item:
+                        draft.final_name = catalog_item.description or draft.final_name
+                        draft.barcode = catalog_item.barcode or draft.barcode
+                        name = draft.final_name or draft.input_name
+                        _append_draft_warning(
+                            draft,
+                            f"Using supplier catalog facts from {catalog_item.catalog_source or 'supplier catalog'}.",
+                        )
+                except Exception as exc:
+                    logger.warning("Supplier catalog fact lookup failed for draft %s: %s", draft.id, exc)
                 result = await enrich_product(
                     name,
                     supplier_code=draft.supplier_code,
@@ -1702,6 +1782,7 @@ async def _enrich_pending_drafts(batch_id: str):
                     kind_hint=kind_hint,
                     available_categories=category_names,
                     available_brands=brand_names,
+                    product_facts=catalog_facts,
                 )
                 draft.kind = result.kind
                 draft.final_name = result.cleaned_name or draft.final_name or name
