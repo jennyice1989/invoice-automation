@@ -173,12 +173,12 @@ class LightspeedClient:
             raise ValueError("domain_prefix and personal_token are required")
 
         self.base_url = f"https://{domain_prefix}.retail.lightspeed.app/api/2.0"
+        self.personal_token = personal_token
         self.max_retries = max_retries
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={
                 "Authorization": f"Bearer {personal_token}",
-                "Content-Type": "application/json",
                 "Accept": "application/json",
                 # Lightspeed asks integrations to identify themselves.
                 "User-Agent": "invoice-importer/0.1 (internal)",
@@ -791,6 +791,7 @@ class LightspeedClient:
         retail_price: float | None = None,
         supply_price: float | None = None,
         supplier_code: str | None = None,
+        description: str | None = None,
     ) -> dict | None:
         """Update select fields on an existing product.
 
@@ -805,6 +806,8 @@ class LightspeedClient:
             payload["supply_price"] = supply_price
         if supplier_code is not None:
             payload["supplier_code"] = supplier_code
+        if description is not None:
+            payload["description"] = description
 
         if not payload:
             return None
@@ -820,6 +823,42 @@ class LightspeedClient:
                 product_id,
             )
             return None
+
+    async def upload_product_image(
+        self,
+        product_id: str,
+        *,
+        image_bytes: bytes,
+        filename: str,
+        content_type: str | None = None,
+    ) -> dict:
+        """Upload a local image file to an existing product."""
+        if not image_bytes:
+            raise ValueError("image_bytes is required")
+        url = f"{self.base_url}/products/{product_id}/actions/image_upload"
+        files = {
+            "image": (
+                filename or "product-image.jpg",
+                image_bytes,
+                content_type or "application/octet-stream",
+            )
+        }
+        resp = await self._client.post(url, files=files)
+
+        if resp.status_code in (401, 403):
+            raise LightspeedAuthError(
+                f"Auth failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        if resp.status_code == 404:
+            raise LightspeedNotFoundError(f"Not found: product image upload {product_id}")
+        if not resp.is_success:
+            raise LightspeedError(
+                f"POST image_upload failed ({resp.status_code}): {resp.text[:500]}"
+            )
+        if not resp.content:
+            return {}
+        data = resp.json()
+        return data.get("data", data)
 
     # ------------------------------------------------------------------ #
     # High-level: push a complete invoice                                #

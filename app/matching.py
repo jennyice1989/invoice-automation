@@ -60,6 +60,7 @@ class MatchedLine:
     product_id: str
     product_sku: str | None
     product_name: str | None
+    current_retail_price: float | None
     matched_by: str  # 'mapping' | 'sku' | 'barcode' | 'fuzzy_name'
     confidence: float  # 0.0–1.0; 1.0 for exact matches
 
@@ -388,6 +389,7 @@ class MatchingService:
                     product_id=mapping.lightspeed_product_id,
                     product_sku=mapping.lightspeed_sku,
                     product_name=mapping.product_name,
+                    current_retail_price=None,
                     matched_by="mapping",
                     confidence=1.0,
                 )
@@ -420,6 +422,9 @@ class MatchingService:
                         product_name=(
                             product.get("name") if product else supplier_item.description
                         ),
+                        current_retail_price=(
+                            product.get("price_excluding_tax") if product else None
+                        ),
                         matched_by="supplier_item",
                         confidence=1.0,
                     )
@@ -440,6 +445,7 @@ class MatchingService:
                     product_id=product["id"],
                     product_sku=product.get("sku"),
                     product_name=product.get("name"),
+                    current_retail_price=product.get("price_excluding_tax"),
                     matched_by="cached_barcode_sku",
                     confidence=1.0,
                 )
@@ -455,6 +461,7 @@ class MatchingService:
                     product_id=product["id"],
                     product_sku=product.get("sku"),
                     product_name=product.get("name"),
+                    current_retail_price=product.get("price_excluding_tax"),
                     matched_by="barcode",
                     confidence=1.0,
                 )
@@ -470,6 +477,7 @@ class MatchingService:
                     product_id=product["id"],
                     product_sku=product.get("sku"),
                     product_name=product.get("name"),
+                    current_retail_price=product.get("price_excluding_tax"),
                     matched_by="sku",
                     confidence=1.0,
                 )
@@ -490,6 +498,7 @@ class MatchingService:
                         product_id=p["id"],
                         product_sku=p.get("sku"),
                         product_name=p.get("name"),
+                        current_retail_price=p.get("price_excluding_tax"),
                         matched_by="supplier_code",
                         confidence=1.0,
                     )
@@ -612,6 +621,7 @@ class MatchingService:
                     product_id=top_product["id"],
                     product_sku=top_product.get("sku"),
                     product_name=top_product.get("name"),
+                    current_retail_price=top_product.get("price_excluding_tax"),
                     matched_by="fuzzy_name+digits" if top_digits else "fuzzy_name",
                     confidence=top_total,
                 )

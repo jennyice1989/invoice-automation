@@ -234,9 +234,9 @@ class PricingRule(Base):
     # Match logic: any of these tokens (case-insensitive) in product
     # category or description will match. Empty = matches anything.
     keywords: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    multiplier: Mapped[float] = mapped_column(Float)  # 2.2 means 2.2x cost
+    multiplier: Mapped[float] = mapped_column(Float)  # 1.5 means 1.5x cost
     rounding: Mapped[str] = mapped_column(String(16), default="charm")
-    # rounding: 'none' | 'cents_99' (round up to .99) | 'charm' (.99/.49)
+    # rounding: 'none' | 'cents_99' | 'charm' / 'cents_49_99'
     priority: Mapped[int] = mapped_column(Integer, default=100)
     enabled: Mapped[bool] = mapped_column(default=True)
 
@@ -450,16 +450,26 @@ async def init_db() -> None:
 
     # Seed default pricing rules if the table is empty.
     async with session_scope() as session:
-        existing = (await session.execute(select(PricingRule))).first()
-        if not existing:
+        existing_rules = (await session.execute(select(PricingRule))).scalars().all()
+        if not existing_rules:
             session.add_all([
-                PricingRule(name="Frozen / refrigerated", keywords="frozen,refrig,cold",
-                            multiplier=2.0, rounding="charm", priority=10),
-                PricingRule(name="Livestock", keywords="live,fish,coral,invert,plant",
-                            multiplier=1.8, rounding="none", priority=20),
-                PricingRule(name="Dry goods (default)", keywords=None,
-                            multiplier=2.2, rounding="charm", priority=1000),
+                PricingRule(name="Default target margin", keywords=None,
+                            multiplier=1.5, rounding="cents_49_99", priority=1000),
             ])
+        elif not any(r.name == "Default target margin" for r in existing_rules):
+            old_seed_names = {
+                "Frozen / refrigerated", "Livestock", "Dry goods (default)",
+            }
+            for rule in existing_rules:
+                if rule.name in old_seed_names:
+                    rule.enabled = False
+            session.add(PricingRule(
+                name="Default target margin",
+                keywords=None,
+                multiplier=1.5,
+                rounding="cents_49_99",
+                priority=1000,
+            ))
 
 
 # --------------------------------------------------------------------- #

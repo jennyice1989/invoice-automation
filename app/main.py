@@ -26,6 +26,7 @@ from app.auth import (
     APP_PASSWORD, COOKIE_MAX_AGE, COOKIE_NAME, check_password,
     make_token, require_auth, require_auth_html,
 )
+from app.audit import audit_catalog, audit_product, target_price_for_cost
 from app.catalog import (
     catalog_status,
     find_cached_product_by_id,
@@ -35,8 +36,8 @@ from app.catalog import (
     upsert_cached_product,
 )
 from app.db import (
-    EnrichmentDraft, Invoice, InvoiceLine, PricingRule, SupplierCatalogItem,
-    SupplierMsrp, SupplierSkuMapping,
+    CatalogProduct, EnrichmentDraft, Invoice, InvoiceLine, PricingRule,
+    SupplierCatalogItem, SupplierMsrp, SupplierSkuMapping,
     find_existing_invoice, init_db, session_scope, upsert_mapping,
 )
 from app.enrichment import (
@@ -59,7 +60,7 @@ from app.supplier_catalog import (
 )
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML,
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
@@ -219,6 +220,13 @@ async def enrich_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
     return HTMLResponse(ENRICH_HTML)
+
+
+@app.get("/audit", response_class=HTMLResponse)
+async def audit_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(AUDIT_HTML)
 
 
 @app.get("/enrich/review/{batch_id}", response_class=HTMLResponse)
@@ -523,6 +531,177 @@ async def admin_delete_mapping(
 
 
 # --------------------------------------------------------------------- #
+# Catalog audit                                                         #
+# --------------------------------------------------------------------- #
+
+@app.get("/audit/products", dependencies=[Depends(require_auth)])
+async def list_audit_products(
+    issue: str | None = None,
+    q: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    session: AsyncSession = Depends(_session),
+):
+    limit = max(1, min(limit, 250))
+    offset = max(0, offset)
+    status_info = await catalog_status(session)
+    if not status_info["product_count"]:
+        try:
+            await sync_lightspeed_catalog(session, _client())
+        except LightspeedError as exc:
+            raise HTTPException(502, str(exc)) from exc
+    return await audit_catalog(
+        session, issue=issue, query=q, limit=limit, offset=offset,
+    )
+
+
+@app.post("/audit/sync", dependencies=[Depends(require_auth)])
+async def sync_audit_catalog(session: AsyncSession = Depends(_session)):
+    try:
+        result = await sync_lightspeed_catalog(session, _client())
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit = await audit_catalog(session, limit=1)
+    return {
+        "ok": True,
+        "product_count": result.total,
+        "upserted": result.upserted,
+        "synced_at": result.synced_at.isoformat(),
+        "summary": audit["summary"],
+    }
+
+
+class AuditApplyRequest(BaseModel):
+    approve_price: bool = False
+    retail_price: float | None = None
+    approve_description: bool = False
+    description: str | None = None
+
+
+@app.post("/audit/products/{product_id}/apply", dependencies=[Depends(require_auth)])
+async def apply_audit_product_update(
+    product_id: str,
+    body: AuditApplyRequest,
+    session: AsyncSession = Depends(_session),
+):
+    product = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found in local catalog cache")
+
+    update: dict = {}
+    if body.approve_price:
+        price = body.retail_price
+        if price is None:
+            price = target_price_for_cost(product.supply_price)
+        if price is None:
+            raise HTTPException(400, "No approved retail price was provided")
+        if product.retail_price is not None and price < product.retail_price:
+            raise HTTPException(
+                400,
+                "Approved retail price is below current retail; this app will not lower prices",
+            )
+        update["retail_price"] = float(price)
+
+    if body.approve_description:
+        description = (body.description or "").strip()
+        if not description:
+            raise HTTPException(400, "Approved description is empty")
+        update["description"] = description
+
+    if not update:
+        raise HTTPException(400, "Nothing approved to update")
+
+    try:
+        updated = await _client().update_product(product_id, **update)
+    except LightspeedError as exc:
+        raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
+    if not updated:
+        raise HTTPException(502, "Lightspeed did not update the product")
+
+    await upsert_cached_product(session, updated)
+    refreshed = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    return {
+        "ok": True,
+        "product": audit_product(refreshed or product),
+    }
+
+
+@app.post("/audit/products/{product_id}/draft-description", dependencies=[Depends(require_auth)])
+async def draft_audit_description(
+    product_id: str,
+    session: AsyncSession = Depends(_session),
+):
+    product = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found in local catalog cache")
+
+    try:
+        result = await enrich_product(
+            product.name or product.sku or product.lightspeed_product_id,
+            supplier_code=product.supplier_code,
+            barcode=product.barcode,
+            supply_price=product.supply_price,
+            available_categories=[],
+            available_brands=[],
+        )
+    except EnrichmentError as exc:
+        raise HTTPException(502, f"OpenAI description draft failed: {exc}") from exc
+    return {
+        "ok": True,
+        "description": result.description_html,
+        "cleaned_name": result.cleaned_name,
+        "warnings": result.warnings,
+    }
+
+
+@app.post("/audit/products/{product_id}/image", dependencies=[Depends(require_auth)])
+async def upload_audit_product_image(
+    product_id: str,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(_session),
+):
+    product = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found in local catalog cache")
+
+    content_type = file.content_type or ""
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(400, "Use a JPG, PNG, or WebP image")
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "Empty image")
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Image is too large (max 10 MB)")
+
+    try:
+        await _client().upload_product_image(
+            product_id,
+            image_bytes=image_bytes,
+            filename=file.filename or "product-image",
+            content_type=content_type,
+        )
+    except LightspeedError as exc:
+        raise HTTPException(502, f"Lightspeed image upload failed: {exc}") from exc
+
+    try:
+        products = await _client().search_products(product.name or product_id, limit=20)
+        refreshed = next((p for p in products if p.get("id") == product_id), None)
+        if refreshed:
+            await upsert_cached_product(session, refreshed)
+    except LightspeedError:
+        pass
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------- #
 # Upload / process                                                      #
 # --------------------------------------------------------------------- #
 
@@ -627,12 +806,13 @@ async def _run_pipeline(
             f"every line will need review."
         )
 
-    async def _price(supplier_code, barcode, description, cost):
+    async def _price(supplier_code, barcode, description, cost, current_retail_price=None):
         try:
             return await price_line(
                 session, supplier_id=supplier_id,
                 supplier_code=supplier_code, barcode=barcode,
                 description=description, cost=cost,
+                current_retail_price=current_retail_price,
             )
         except Exception as exc:
             logger.warning("Pricing failed: %s", exc)
@@ -657,10 +837,12 @@ async def _run_pipeline(
         )
         pr = await _price(
             m.raw.supplier_code, m.raw.barcode, m.raw.description, m.raw.unit_cost,
+            m.current_retail_price,
         )
         meta = {
             "matched_by": m.matched_by, "confidence": m.confidence,
             "product_sku": m.product_sku, "product_name": m.product_name,
+            "current_retail_price": m.current_retail_price,
         }
         invoice_lines_for_db.append(InvoiceLine(
             invoice_id=invoice.id,
@@ -676,9 +858,12 @@ async def _run_pipeline(
             "barcode": m.raw.barcode, "quantity": m.raw.quantity,
             "unit_cost": m.raw.unit_cost, "product_id": m.product_id,
             "product_sku": m.product_sku, "product_name": m.product_name,
+            "current_retail_price": m.current_retail_price,
             "matched_by": m.matched_by, "confidence": m.confidence,
             "suggested_retail_price": pr.price, "pricing_source": pr.source,
-            "pricing_notes": pr.notes,
+            "pricing_notes": pr.notes, "msrp": pr.msrp,
+            "target_margin_price": pr.target_price,
+            "competitor_prices": pr.scraped_data,
         })
 
     for u in unmatched_results:
@@ -710,6 +895,8 @@ async def _run_pipeline(
             "unit_cost": u.raw.unit_cost, "candidates": u.candidates,
             "reason": u.reason, "suggested_retail_price": pr.price,
             "pricing_source": pr.source, "pricing_notes": pr.notes,
+            "msrp": pr.msrp, "target_margin_price": pr.target_price,
+            "competitor_prices": pr.scraped_data,
         })
 
     session.add_all(invoice_lines_for_db)
@@ -1007,8 +1194,7 @@ async def finalize_invoice(
         if body.update_costs_for_existing:
             try:
                 retail = body.matched_overrides.get(str(idx)) \
-                    or body.matched_overrides.get(idx) \
-                    or m.get("suggested_retail_price")
+                    or body.matched_overrides.get(idx)
                 product = await _get_existing_product(m.get("product_id"))
                 existing_retail = _existing_retail(product)
                 should_update_retail, retail_reason = retail_update_decision(
@@ -1221,6 +1407,7 @@ async def finalize_invoice(
                 "kind_hint": dec.kind_hint if dec.kind_hint in ("dry_good", "live_fish") else None,
                 "quantity": dec.quantity,
                 "unit_cost": dec.unit_cost,
+                "retail_price": dec.retail_price_override,
             })
             continue
 
@@ -1303,6 +1490,7 @@ async def finalize_invoice(
                 source_quantity=q["quantity"],
                 source_cost=q["unit_cost"],
                 source_receive_immediately=body.receive_immediately,
+                retail_price=q["retail_price"],
             )
             session.add(draft)
 
@@ -1701,7 +1889,7 @@ async def _enrich_pending_drafts(batch_id: str):
     """Background task: draft content for every PENDING_ENRICH row in a
     batch, one at a time. Marks each DRAFT when done, or records error.
     Runs in its own DB session since the request session has closed."""
-    # Fetch the user's category and brand lists ONCE per batch so Claude
+    # Fetch the user's category and brand lists ONCE per batch so OpenAI
     # can pick from real values. Only LEAF categories are offered — products
     # shouldn't be assigned to parent categories.
     client = getattr(app.state, "lightspeed", None)
@@ -2244,6 +2432,44 @@ async def create_from_draft(
         "added_to_consignment": added_to_consignment,
         "draft": _draft_to_dict(draft),
     }
+
+
+@app.post("/enrich/draft/{draft_id}/image", dependencies=[Depends(require_auth)])
+async def upload_draft_image(
+    draft_id: int,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(_session),
+):
+    """Upload an approved product image to the created Lightspeed product."""
+    draft = (await session.execute(
+        select(EnrichmentDraft).where(EnrichmentDraft.id == draft_id)
+    )).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if not draft.lightspeed_product_id:
+        raise HTTPException(409, "Create the product before uploading an image")
+
+    content_type = file.content_type or ""
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(400, "Use a JPG, PNG, or WebP image")
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "Empty image")
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Image is too large (max 10 MB)")
+
+    try:
+        await _client().upload_product_image(
+            draft.lightspeed_product_id,
+            image_bytes=image_bytes,
+            filename=file.filename or "product-image",
+            content_type=content_type,
+        )
+    except LightspeedError as exc:
+        raise HTTPException(502, f"Lightspeed image upload failed: {exc}") from exc
+
+    draft.has_photo = True
+    return {"ok": True, "draft": _draft_to_dict(draft)}
 
 
 @app.post("/enrich/draft/{draft_id}/skip", dependencies=[Depends(require_auth)])

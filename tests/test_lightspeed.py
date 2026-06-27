@@ -394,6 +394,33 @@ async def test_create_product_reports_unexpected_string_response(client_factory)
 
 
 @pytest.mark.asyncio
+async def test_upload_product_image_posts_multipart_without_json_content_type(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["content_type"] = request.headers.get("content-type")
+        captured["body"] = request.content
+        return httpx.Response(200, json={"data": {"id": "img-1"}})
+
+    client = client_factory(handler)
+    result = await client.upload_product_image(
+        "prod-1",
+        image_bytes=b"fake-image",
+        filename="image.jpg",
+        content_type="image/jpeg",
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/2.0/products/prod-1/actions/image_upload")
+    assert captured["content_type"].startswith("multipart/form-data")
+    assert b"fake-image" in captured["body"]
+    assert result["id"] == "img-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_import_invoice_full_receive_flow(client_factory):
     """End-to-end: create -> add items -> dispatched -> received."""
     calls: list[tuple[str, str]] = []

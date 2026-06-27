@@ -84,6 +84,7 @@ input[type=text], input[type=password], input[type=number] {
 _NAV = """<nav>
 <a href="/" id="nav-home">Upload</a>
 <a href="/enrich" id="nav-enrich">Add products</a>
+<a href="/audit" id="nav-audit">Catalog audit</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
 <a href="/admin" id="nav-admin">Admin</a>
@@ -277,6 +278,223 @@ function escAttr(s) { return String(s == null ? '' : s).replace(/'/g, "\\\\'"); 
 </body></html>"""
 
 
+AUDIT_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Catalog audit</title>
+<style>""" + _COMMON_CSS + """
+.toolbar { display: grid; grid-template-columns: 1fr 180px auto auto; gap: 8px;
+           align-items: center; margin-bottom: 16px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+           gap: 8px; margin-bottom: 16px; }
+.metric { background: white; border: 1px solid var(--border); border-radius: 6px;
+          padding: 10px 12px; }
+.metric strong { display: block; font-size: 18px; }
+.metric span { color: var(--muted); font-size: 12px; }
+.audit-row { background: white; border: 1px solid var(--border); border-radius: 8px;
+             padding: 14px 16px; margin-bottom: 10px; }
+.audit-head { display: grid; grid-template-columns: 1fr auto; gap: 12px;
+              align-items: start; }
+.audit-head h2 { margin: 0 0 4px; }
+.audit-meta { color: var(--muted); font-size: 12px; }
+.issue-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.issue { display: inline-block; padding: 2px 7px; border-radius: 4px;
+         font-size: 11px; font-weight: 600; }
+.issue.high { background: var(--bad-bg); color: var(--bad); }
+.issue.medium { background: var(--warn-bg); color: var(--warn); }
+.issue.low { background: #f3f4f6; color: #4b5563; }
+.audit-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+                 margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.audit-actions textarea { width: 100%; min-height: 110px; font: 12px/1.4 ui-monospace, monospace;
+                          padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+.price-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.price-box input { width: 100px; }
+.empty { color: var(--muted); padding: 24px; text-align: center; }
+@media (max-width: 760px) {
+  .toolbar, .audit-actions, .audit-head { grid-template-columns: 1fr; }
+}
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-audit">Catalog audit<', 'id="nav-audit" class="active">Catalog audit<') + """
+  <h1>Catalog audit</h1>
+  <p class="subtitle">Review existing Lightspeed products for missing photos, weak descriptions, and pricing below target.</p>
+
+  <div class="toolbar">
+    <input type="text" id="q" placeholder="Search name, SKU, barcode, supplier code" onkeydown="if(event.key==='Enter') load()" />
+    <select id="issue" onchange="load()">
+      <option value="all">All issues</option>
+      <option value="missing_description">Missing description</option>
+      <option value="weak_description">Weak description</option>
+      <option value="missing_photo">Missing photo</option>
+      <option value="below_target_margin">Below target margin</option>
+      <option value="missing_price">Missing price</option>
+      <option value="missing_barcode_sku">Missing barcode/SKU</option>
+      <option value="missing_brand">Missing brand</option>
+      <option value="missing_category">Missing category</option>
+    </select>
+    <button class="secondary" onclick="load()">Search</button>
+    <button class="primary" id="syncBtn" onclick="syncCatalog()">Sync catalog</button>
+  </div>
+
+  <div id="summary" class="summary"></div>
+  <div id="content"><p style="color:var(--muted)">Loading...</p></div>
+</div>
+<script>
+let PRODUCTS = [];
+
+(async () => { await load(); })();
+
+async function load() {
+  const q = document.getElementById('q').value.trim();
+  const issue = document.getElementById('issue').value;
+  const params = new URLSearchParams({ limit: '100', issue });
+  if (q) params.set('q', q);
+  const resp = await fetch('/audit/products?' + params.toString());
+  const data = await resp.json();
+  if (!resp.ok) {
+    document.getElementById('content').innerHTML =
+      '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
+    return;
+  }
+  PRODUCTS = data.data || [];
+  renderSummary(data.summary || {});
+  renderProducts();
+}
+
+async function syncCatalog() {
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Syncing';
+  try {
+    const resp = await fetch('/audit/sync', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      alert('Sync failed: ' + (data.detail || resp.statusText));
+    }
+    await load();
+  } finally {
+    btn.disabled = false; btn.textContent = 'Sync catalog';
+  }
+}
+
+function renderSummary(s) {
+  const items = [
+    ['Products', s.products || 0],
+    ['With issues', s.with_issues || 0],
+    ['Missing photos', s.missing_photo || 0],
+    ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
+    ['Below target', s.below_target_margin || 0],
+    ['Missing codes', s.missing_barcode_sku || 0],
+  ];
+  document.getElementById('summary').innerHTML = items.map(([label, value]) =>
+    '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
+  ).join('');
+}
+
+function renderProducts() {
+  const el = document.getElementById('content');
+  if (!PRODUCTS.length) {
+    el.innerHTML = '<div class="card empty">No products match this audit filter.</div>';
+    return;
+  }
+  el.innerHTML = PRODUCTS.map(renderProduct).join('');
+}
+
+function renderProduct(p) {
+  const issues = (p.issues || []).map(i =>
+    '<span class="issue ' + i.severity + '">' + escape(i.label) + '</span>'
+  ).join('');
+  const price = p.retail_price == null ? '—' : '$' + p.retail_price.toFixed(2);
+  const target = p.target_price == null ? '—' : '$' + p.target_price.toFixed(2);
+  return '<div class="audit-row" id="row-' + p.id + '">'
+    + '<div class="audit-head"><div>'
+    + '<h2>' + escape(p.name || '(unnamed product)') + '</h2>'
+    + '<div class="audit-meta">'
+    + 'SKU ' + escape(p.sku || '—') + ' · Barcode ' + escape(p.barcode || '—')
+    + ' · Brand ' + escape(p.brand_name || '—') + ' · Category ' + escape(p.category_name || '—')
+    + '</div><div class="issue-list">' + issues + '</div></div>'
+    + '<div class="num">Retail ' + price + '<br><small>Target ' + target + '</small></div></div>'
+    + '<div class="audit-actions">'
+    + '<div><h2>Description</h2>'
+    + '<textarea id="desc-' + p.id + '">' + escape(p.description || '') + '</textarea>'
+    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button class="secondary" onclick="draftDescription(\\'' + p.id + '\\')">Draft with OpenAI</button>'
+    + '<button class="primary" onclick="applyDescription(\\'' + p.id + '\\')">Approve description</button>'
+    + '</div></div>'
+    + '<div><h2>Pricing & photo</h2>'
+    + '<div class="price-box">$<input type="number" step="0.01" id="price-' + p.id + '" value="'
+    + (p.target_price != null ? p.target_price.toFixed(2) : '') + '" />'
+    + '<button class="primary" onclick="applyPrice(\\'' + p.id + '\\')">Approve price</button></div>'
+    + '<div style="margin-top:12px"><input type="file" accept="image/jpeg,image/png,image/webp" '
+    + 'onchange="uploadImage(\\'' + p.id + '\\', this.files[0])" />'
+    + '<div class="audit-meta">Use supplier/manufacturer images or licensed files only.</div></div>'
+    + '<div id="msg-' + p.id + '" style="margin-top:10px"></div>'
+    + '</div></div></div>';
+}
+
+async function draftDescription(id) {
+  const msg = document.getElementById('msg-' + id);
+  msg.innerHTML = '<span class="spinner"></span>Drafting description...';
+  const resp = await fetch('/audit/products/' + id + '/draft-description', { method: 'POST' });
+  const data = await resp.json();
+  if (resp.ok) {
+    document.getElementById('desc-' + id).value = data.description || '';
+    msg.innerHTML = '<div class="success">Draft ready. Review it, then approve.</div>';
+  } else {
+    msg.innerHTML = '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
+  }
+}
+
+async function applyDescription(id) {
+  const description = document.getElementById('desc-' + id).value;
+  await applyUpdate(id, { approve_description: true, description });
+}
+
+async function applyPrice(id) {
+  const price = parseFloat(document.getElementById('price-' + id).value);
+  if (isNaN(price)) { alert('Enter an approved price.'); return; }
+  await applyUpdate(id, { approve_price: true, retail_price: price });
+}
+
+async function applyUpdate(id, body) {
+  const msg = document.getElementById('msg-' + id);
+  msg.innerHTML = '<span class="spinner"></span>Applying update...';
+  const resp = await fetch('/audit/products/' + id + '/apply', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (resp.ok) {
+    msg.innerHTML = '<div class="success">Updated in Lightspeed.</div>';
+    await load();
+  } else {
+    msg.innerHTML = '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
+  }
+}
+
+async function uploadImage(id, file) {
+  if (!file) return;
+  const msg = document.getElementById('msg-' + id);
+  msg.innerHTML = '<span class="spinner"></span>Uploading image...';
+  const form = new FormData();
+  form.append('file', file);
+  const resp = await fetch('/audit/products/' + id + '/image', { method: 'POST', body: form });
+  const data = await resp.json();
+  if (resp.ok) {
+    msg.innerHTML = '<div class="success">Image uploaded.</div>';
+    await load();
+  } else {
+    msg.innerHTML = '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
+  }
+}
+
+function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+</script>
+</body></html>"""
+
+
 REVIEW_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -348,12 +566,6 @@ let ORDER_COSTS = [];
     return;
   }
   DATA = result;
-  // Initialize matched overrides to suggested retail
-  (DATA.data.matched || []).forEach((m, i) => {
-    if (m.suggested_retail_price != null) {
-      MATCHED_PRICE_OVERRIDES[i] = m.suggested_retail_price;
-    }
-  });
   render();
 })();
 
@@ -449,7 +661,7 @@ function render() {
   if (d.matched.length) {
     html += '<div class="bucket-title"><span class="badge match">Match</span>'
          + '<h2>Existing products to update</h2>'
-         + '<small>(' + d.matched.length + ' — cost + retail price will be updated on import)</small>'
+         + '<small>(' + d.matched.length + ' — costs update on import; retail changes require approval)</small>'
          + '</div>';
     d.matched.forEach((m, i) => {
       html += renderMatchedRow(m, i, isImported);
@@ -473,14 +685,14 @@ function render() {
          + '<label class="opt"><input type="checkbox" id="receive" />'
          + 'Mark RECEIVED immediately (updates inventory)</label>'
          + '<label class="opt"><input type="checkbox" id="updateCosts" checked />'
-         + 'Update cost + retail on matched products</label>'
+         + 'Update costs on matched products</label>'
          + '<div style="flex-basis:100%;display:flex;gap:8px;align-items:end;flex-wrap:wrap">'
          + '<label style="font-size:12px;color:var(--muted)">Freight / extra cost'
          + '<input id="extraLabel" type="text" value="Freight" style="display:block;margin-top:4px" /></label>'
          + '<label style="font-size:12px;color:var(--muted)">Amount'
          + '<input id="extraAmount" type="number" step="0.01" placeholder="0.00" style="display:block;margin-top:4px;width:110px" /></label>'
          + '<button class="cand-btn" type="button" onclick="addOrderCost()">Add cost</button>'
-         + '<span id="orderCostsView"></span></div>'
+         + '<span id="orderCostsView"></span></div>
          + '<span class="grow"></span>'
          + '<button class="primary" id="finalBtn" onclick="finalize()">'
          + 'Push to Lightspeed</button></div>'
@@ -495,6 +707,9 @@ function render() {
 function renderMatchedRow(m, i, locked) {
   const pricing = m.suggested_retail_price;
   const source = m.pricing_source || 'none';
+  const approved = MATCHED_PRICE_OVERRIDES[i] != null;
+  const current = m.current_retail_price != null ? '$' + m.current_retail_price.toFixed(2) : '—';
+  const recommended = pricing != null ? '$' + pricing.toFixed(2) : '—';
   return '<div class="line-row">' +
     '<div class="from"><strong>' + escape(m.product_name) + '</strong>' +
       '<small>' + escape(m.product_sku || '') + ' · matched by ' + m.matched_by + '</small>' +
@@ -503,9 +718,15 @@ function renderMatchedRow(m, i, locked) {
       '<br><small>= $' + (m.quantity * m.unit_cost).toFixed(2) + '</small></div>' +
     '<div class="price-cell">' +
       '<span class="pricing-pill ' + sourceClass(source) + '">' + sourceLabel(source) + '</span>' +
-      (locked ? ('<span style="font-size:13px">$' + (pricing != null ? pricing.toFixed(2) : '—') + '</span>')
-              : ('$<input type="number" step="0.01" value="' + (pricing != null ? pricing.toFixed(2) : '')
-                + '" onchange="MATCHED_PRICE_OVERRIDES[' + i + ']=parseFloat(this.value)||null" />')) +
+      '<small>current ' + current + '<br>recommended ' + recommended + '</small>' +
+      (locked ? ''
+              : ('<label class="opt" title="Retail price will only update if approved">'
+                + '<input type="checkbox" ' + (approved ? 'checked' : '')
+                + ' onchange="toggleMatchedPriceApproval(' + i + ', this.checked)" />'
+                + 'Approve</label>'
+                + '$<input type="number" step="0.01" value="' + (pricing != null ? pricing.toFixed(2) : '')
+                + '" onchange="setMatchedApprovedPrice(' + i + ', this.value)" '
+                + (approved ? '' : 'disabled') + ' />')) +
     '</div>' +
     '<div></div></div>';
 }
@@ -571,10 +792,30 @@ function matchExisting(i, productId, name) {
     supplier_code: u.supplier_code, description: u.description,
     barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
     lightspeed_product_id: productId,
-    retail_price_override: u.suggested_retail_price,
+    retail_price_override: null,
     _name: name,
   };
   render();
+}
+
+function toggleMatchedPriceApproval(i, checked) {
+  const m = DATA.data.matched[i];
+  if (!m) return;
+  if (checked && m.suggested_retail_price != null) {
+    MATCHED_PRICE_OVERRIDES[i] = m.suggested_retail_price;
+  } else {
+    delete MATCHED_PRICE_OVERRIDES[i];
+  }
+  render();
+}
+
+function setMatchedApprovedPrice(i, value) {
+  const n = parseFloat(value);
+  if (isNaN(n)) {
+    delete MATCHED_PRICE_OVERRIDES[i];
+  } else {
+    MATCHED_PRICE_OVERRIDES[i] = n;
+  }
 }
 
 async function openSearch(i) {
@@ -599,6 +840,7 @@ function queueNew(i, kindHint) {
     decision: 'queue_enrich',
     supplier_code: u.supplier_code, description: u.description,
     barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
+    retail_price_override: u.suggested_retail_price,
     kind_hint: kindHint,
   };
   render();
@@ -633,6 +875,7 @@ function queueAllUnresolved() {
       decision: 'queue_enrich',
       supplier_code: u.supplier_code, description: u.description,
       barcode: u.barcode, quantity: u.quantity, unit_cost: u.unit_cost,
+      retail_price_override: u.suggested_retail_price,
       kind_hint: null,
     };
   });
@@ -850,8 +1093,8 @@ form.upload { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
   <div class="card">
     <h2>Pricing rules</h2>
-    <p class="subtitle">Markup is cost × multiplier, applied in priority order. First match wins.
-       Default rule (no keywords) catches everything else.</p>
+    <p class="subtitle">Pricing recommendations use cost × multiplier, applied in priority order.
+       Retail prices are pushed only after approval on the invoice review screen.</p>
     <div id="rules">Loading...</div>
     <div class="rule-row" style="border-top: 2px solid var(--border); margin-top: 8px">
       <input id="rname" placeholder="Rule name" />
@@ -859,7 +1102,9 @@ form.upload { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
       <input id="rmult" type="number" step="0.01" placeholder="2.2" />
       <input id="rpri" type="number" placeholder="100" />
       <select id="rround">
-        <option value="charm">.99 rounding</option>
+        <option value="cents_49_99">.49 / .99 rounding</option>
+        <option value="charm">.49 / .99 rounding</option>
+        <option value="cents_99">.99 rounding</option>
         <option value="none">no rounding</option>
       </select>
       <button class="secondary" onclick="addRule()">Add</button>
@@ -1344,8 +1589,8 @@ ENRICH_REVIEW_HTML = """<!DOCTYPE html>
 """ + _NAV + """
   <h1>Review drafted products</h1>
   <p class="subtitle">Edit anything that's wrong. UPC lookup is available
-  for Central Pet, Phillips Pet, and Reef H2O drafts. Create pushes the
-  product to Lightspeed.</p>
+  for Central Pet, Phillips Pet, and Reef H2O drafts. Yellow fields are ones
+  OpenAI flagged as uncertain. Create pushes the product to Lightspeed.</p>
   <div id="content"><p style="color:var(--muted)">Loading...</p></div>
 </div>
 <script>
@@ -1515,6 +1760,13 @@ function renderDraft(d) {
     + 'text-transform:none;font-size:13px"><input type="checkbox"' +
     (d.has_photo ? ' checked':'') + dis + ' onchange="upd(' + d.id +
     ',\\'has_photo\\',this.checked)" /> I have a photo to add in Lightspeed</label></div>';
+  if (d.lightspeed_product_id) {
+    html += '<div class="field"><label>Upload photo</label>'
+      + '<input type="file" accept="image/jpeg,image/png,image/webp" '
+      + 'onchange="uploadImage(' + d.id + ', this.files[0])" />'
+      + '<small style="color:var(--muted)">Use supplier/manufacturer images or licensed files only.</small>'
+      + '</div>';
+  }
 
   // Tags
   html += field('Tags (comma-separated)', '_tags_str',
@@ -1557,7 +1809,7 @@ function categoryOptions(selectedName) {
 function brandOptions(selectedName) {
   let opts = '<option value="">— none —</option>';
   // Include the currently-selected brand even if it's not in the list
-  // (Claude might suggest a brand that isn't in your Lightspeed Brands)
+  // (OpenAI might suggest a brand that isn't in your Lightspeed Brands)
   let seen = new Set();
   if (selectedName && !BRANDS.some(b => b.name === selectedName)) {
     opts += '<option value="' + escAttr(selectedName) + '" selected>' +
@@ -1694,6 +1946,27 @@ async function skipDraft(id) {
     const d = DRAFTS.find(x => x.id === id);
     if (d) d.status = 'SKIPPED';
     render();
+  }
+}
+async function uploadImage(id, file) {
+  if (!file) return;
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const resp = await fetch('/enrich/draft/' + id + '/image', {
+      method: 'POST',
+      body: form,
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      const i = DRAFTS.findIndex(x => x.id === id);
+      DRAFTS[i] = data.draft;
+      render();
+    } else {
+      alert('Image upload failed: ' + (data.detail || resp.statusText));
+    }
+  } catch (err) {
+    alert('Image upload failed: ' + err.message);
   }
 }
 async function createAll() {

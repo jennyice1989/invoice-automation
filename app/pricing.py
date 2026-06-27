@@ -39,6 +39,9 @@ class PricingResult:
     rule_name: str | None = None
     notes: str | None = None
     scraped_data: dict | None = None
+    msrp: float | None = None
+    target_price: float | None = None
+    current_retail_price: float | None = None
 
 
 # --------------------------------------------------------------------- #
@@ -53,10 +56,21 @@ def _round(price: float, mode: str) -> float:
     if mode == "cents_99":
         return math.floor(price) + 0.99
     if mode == "charm":
-        # .99 for <$10, .99 for $10–$50, .99 for higher too.
-        # (Pet retail almost always uses .99 endings regardless of band.)
-        return math.floor(price) + 0.99
+        return _round_49_99(price)
+    if mode in ("cents_49_99", "nearest_49_99"):
+        return _round_49_99(price)
     return round(price, 2)
+
+
+def _round_49_99(price: float) -> float:
+    """Round up to the next .49 or .99 ending."""
+    dollars = math.floor(price)
+    cents = round(price - dollars, 2)
+    if cents <= 0.49:
+        return round(dollars + 0.49, 2)
+    if cents <= 0.99:
+        return round(dollars + 0.99, 2)
+    return round(dollars + 1.49, 2)
 
 
 async def _apply_rules(
@@ -78,7 +92,7 @@ async def _apply_rules(
         price = cost * rule.multiplier
         price = _round(price, rule.rounding)
         return PricingResult(
-            price=price, source="rule", rule_name=rule.name,
+            price=price, source="rule", rule_name=rule.name, target_price=price,
             notes=f"{rule.multiplier}x cost, rounded ({rule.rounding})",
         )
     return PricingResult(price=None, source="none")
@@ -194,6 +208,7 @@ async def price_line(
     barcode: str | None,
     description: str | None,
     cost: float,
+    current_retail_price: float | None = None,
     try_scrape: bool = True,
 ) -> PricingResult:
     """Resolve a retail price for one invoice line.
@@ -201,31 +216,63 @@ async def price_line(
     Returns the best available price plus its source. Always returns a
     PricingResult; price may be None if nothing matched.
     """
-    # 1. MSRP from uploaded price list
+    # 1. Target margin rule. This is the recommendation baseline.
+    rule_result = await _apply_rules(session, cost, description)
+    target_price = rule_result.price
+    notes = [rule_result.notes] if rule_result.notes else []
+
+    # 2. MSRP from uploaded price list. MSRP is a comparison point, not an
+    # automatic override, so the user can approve the final recommendation.
+    msrp_value: float | None = None
     if supplier_id:
         msrp = await find_msrp(
             session, supplier_id=supplier_id,
             supplier_code=supplier_code, barcode=barcode,
         )
         if msrp:
-            return PricingResult(
-                price=msrp.msrp, source="msrp",
-                notes=msrp.notes or "From uploaded MSRP list",
-            )
+            msrp_value = msrp.msrp
+            notes.append(f"MSRP ${msrp.msrp:.2f}" + (f": {msrp.notes}" if msrp.notes else ""))
 
-    # 2. Scrape (best effort) — only if explicitly enabled
+    # 3. Retail competitor review — only first-party retailer pages, not
+    # marketplaces. These are alignment signals; they do not force a lower
+    # price.
+    scraped_data: dict | None = None
+    competitor_prices: list[float] = []
     if try_scrape and ENABLE_SCRAPING and description:
         source, price, data = await _try_scrape(description)
+        scraped_data = data
         if source and price:
-            return PricingResult(
-                price=price, source=source, scraped_data=data,
-                notes="Scraped from public listing",
+            competitor_prices = [
+                float(v) for v in data.values() if isinstance(v, (int, float)) and v > 0
+            ]
+            low = min(competitor_prices)
+            high = max(competitor_prices)
+            notes.append(
+                f"Retailer comparison ${low:.2f}-${high:.2f}; marketplace sellers excluded"
             )
 
-    # 3. Rules engine
-    rule_result = await _apply_rules(session, cost, description)
-    if rule_result.price is not None:
-        return rule_result
+    candidates = [p for p in (target_price, msrp_value) if p is not None and p > 0]
+    recommended = max(candidates) if candidates else None
+
+    if current_retail_price is not None and recommended is not None:
+        if recommended < current_retail_price:
+            notes.append(
+                f"Recommendation held at current retail ${current_retail_price:.2f}; app will not recommend a lower price"
+            )
+            recommended = current_retail_price
+
+    if recommended is not None:
+        source = "msrp" if msrp_value is not None and recommended == msrp_value else rule_result.source
+        return PricingResult(
+            price=recommended,
+            source=source or "rule",
+            rule_name=rule_result.rule_name,
+            notes="; ".join(notes) if notes else None,
+            scraped_data=scraped_data,
+            msrp=msrp_value,
+            target_price=target_price,
+            current_retail_price=current_retail_price,
+        )
 
     # Nothing worked.
     return PricingResult(price=None, source="none", notes="No pricing source available")

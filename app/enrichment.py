@@ -1,19 +1,19 @@
 """
-Product enrichment via Claude.
+Product enrichment via OpenAI.
 
 Drafts a retail-quality HTML product description in the style of A2Z
 Aquariums' existing catalog (h3 heading, paragraph structure, brand
 mentions). For live fish, care details are woven into the prose
 naturally rather than living in a separate structured template.
 
-What Claude DRAFTS:
+What OpenAI drafts:
   - name (cleaned up if the input is a supplier abbreviation)
   - description (HTML)
   - product_category (picked from the real list provided)
   - brand_name (inferred from product name)
   - tags (suggested)
 
-What stays manual (Claude never invents):
+What stays manual (OpenAI never invents):
   - UPC / barcode
   - product photo (still manual)
   - exact retail price (rules engine handles this elsewhere)
@@ -32,9 +32,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1/messages"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.5")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 
 class EnrichmentError(Exception):
@@ -46,7 +46,7 @@ ProductKind = Literal["dry_good", "live_fish", "live_invert", "live_plant", "liv
 
 @dataclass
 class EnrichmentResult:
-    """What Claude drafts for one product."""
+    """What OpenAI drafts for one product."""
     input_name: str
     cleaned_name: str | None = None
     kind: ProductKind = "unknown"
@@ -117,6 +117,42 @@ emergency detoxifier if ammonia or nitrite spike. Safe for fresh and
 saltwater, planted tanks, and reef systems.</p>
 <p>Available at <strong>A2Z Aquariums</strong>.</p>
 """
+
+
+_OPENAI_ENRICHMENT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "cleaned_name": {"type": ["string", "null"]},
+        "kind": {
+            "type": "string",
+            "enum": [
+                "dry_good",
+                "live_fish",
+                "live_invert",
+                "live_plant",
+                "live_coral",
+                "unknown",
+            ],
+        },
+        "product_category": {"type": ["string", "null"]},
+        "brand_name": {"type": ["string", "null"]},
+        "description_html": {"type": ["string", "null"]},
+        "suggested_tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 5,
+        },
+    },
+    "required": [
+        "cleaned_name",
+        "kind",
+        "product_category",
+        "brand_name",
+        "description_html",
+        "suggested_tags",
+    ],
+}
 
 
 def _build_prompt(
@@ -210,8 +246,8 @@ async def enrich_product(
     product_facts: str | None = None,
 ) -> EnrichmentResult:
     """Enrich a single product."""
-    if not ANTHROPIC_API_KEY:
-        raise EnrichmentError("ANTHROPIC_API_KEY not configured")
+    if not OPENAI_API_KEY:
+        raise EnrichmentError("OPENAI_API_KEY not configured")
     if not product_name or not product_name.strip():
         raise EnrichmentError("Empty product name")
 
@@ -228,17 +264,32 @@ async def enrich_product(
     )
 
     payload = {
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 2000,
-        "messages": [{"role": "user", "content": prompt}],
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You write accurate specialty retail product catalog copy. "
+                    "Return only data that fits the requested schema."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "product_enrichment",
+                "strict": True,
+                "schema": _OPENAI_ENRICHMENT_SCHEMA,
+            },
+        },
     }
 
     async with httpx.AsyncClient(timeout=90.0) as client:
         resp = await client.post(
-            ANTHROPIC_BASE_URL,
+            f"{OPENAI_BASE_URL.rstrip('/')}/chat/completions",
             headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "content-type": "application/json",
             },
             json=payload,
@@ -246,14 +297,16 @@ async def enrich_product(
 
     if not resp.is_success:
         raise EnrichmentError(
-            f"Anthropic API error {resp.status_code}: {resp.text[:300]}"
+            f"OpenAI API error {resp.status_code}: {resp.text[:300]}"
         )
 
     data = resp.json()
-    text = "\n".join(
-        b.get("text", "") for b in data.get("content", [])
-        if b.get("type") == "text"
-    ).strip()
+    try:
+        text = data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise EnrichmentError(
+            f"Unexpected OpenAI response shape: {json.dumps(data)[:300]}"
+        ) from exc
     parsed = _parse_json(text)
     return _to_result(product_name, parsed, available_categories or [])
 
@@ -330,7 +383,7 @@ def _to_result(
 
     category = _s(parsed.get("product_category"))
     if category and available_categories and category not in available_categories:
-        # Claude returned a category not in the list — flag it and clear.
+        # OpenAI returned a category not in the list — flag it and clear.
         warnings.append(
             f"Suggested category '{category}' is not in your category list. "
             f"Pick one manually."
