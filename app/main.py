@@ -578,6 +578,41 @@ class AuditApplyRequest(BaseModel):
     description: str | None = None
 
 
+async def _find_live_audit_product(
+    client: LightspeedClient,
+    session: AsyncSession,
+    product: CatalogProduct,
+) -> CatalogProduct | None:
+    """Find the current live product when the cached id no longer updates."""
+    candidates: list[dict | None] = []
+    if product.barcode:
+        candidates.append(await client.find_product_by_barcode(product.barcode))
+    if product.sku:
+        candidates.append(await client.find_product_by_sku(product.sku))
+    if product.supplier_code:
+        candidates.append(await client.find_product_by_supplier_code(product.supplier_code))
+    if product.name:
+        matches = await client.search_products(product.name, limit=10)
+        normalized_name = (product.name or "").strip().lower()
+        candidates.extend(
+            m for m in matches
+            if (m.get("name") or "").strip().lower() == normalized_name
+        )
+
+    for candidate in candidates:
+        if not candidate or not candidate.get("id"):
+            continue
+        await upsert_cached_product(session, candidate)
+        row = (await session.execute(
+            select(CatalogProduct).where(
+                CatalogProduct.lightspeed_product_id == candidate["id"]
+            )
+        )).scalar_one_or_none()
+        if row:
+            return row
+    return None
+
+
 @app.post("/audit/products/{product_id}/apply", dependencies=[Depends(require_auth)])
 async def apply_audit_product_update(
     product_id: str,
@@ -614,14 +649,22 @@ async def apply_audit_product_update(
         raise HTTPException(400, "Nothing approved to update")
 
     try:
-        updated = await _client().update_product(product_id, **update)
+        client = _client()
+        updated = await client.update_product(product_id, **update)
+        if not updated:
+            live_product = await _find_live_audit_product(client, session, product)
+            if live_product and live_product.lightspeed_product_id != product_id:
+                product = live_product
+                product_id = live_product.lightspeed_product_id
+                updated = await client.update_product(product_id, **update)
     except LightspeedError as exc:
         raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
     if not updated:
         raise HTTPException(
             502,
             "Lightspeed could not update this product. It may be archived, "
-            "deleted, or unavailable to the API token.",
+            "deleted, or unavailable to the API token. Sync the catalog and "
+            f"check product '{product.name or product_id}' ({product_id}).",
         )
 
     partial_update = updated.get("_partial_update") if isinstance(updated, dict) else None
