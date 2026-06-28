@@ -664,14 +664,18 @@ async def apply_audit_product_update(
         product.deleted_at = product.deleted_at or "update_not_found"
         product.updated_at = datetime.utcnow()
         await session.flush()
-        raise HTTPException(
-            409,
-            "Lightspeed could not find this product for updates, so it was "
-            "marked inactive in the local audit cache. It may be archived, "
-            "deleted, or unavailable to the API token. Sync the catalog to "
-            f"refresh the audit list. Product: '{product.name or product_id}' "
-            f"({product_id}).",
-        )
+        return {
+            "ok": True,
+            "retired": True,
+            "detail": (
+                "Lightspeed could not find this product for updates, so it "
+                "was removed from the local audit queue. It may be archived, "
+                "deleted, or unavailable to the API token. Sync the catalog "
+                "to refresh the audit list."
+            ),
+            "product_id": product_id,
+            "product_name": product.name,
+        }
 
     partial_update = updated.get("_partial_update") if isinstance(updated, dict) else None
     if partial_update:

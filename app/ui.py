@@ -465,7 +465,11 @@ async function applyUpdate(id, body) {
   });
   const data = await resp.json();
   if (resp.ok) {
-    msg.innerHTML = '<div class="success">Updated in Lightspeed.</div>';
+    if (data.retired) {
+      msg.innerHTML = '<div class="success">' + escape(data.detail || 'Product removed from audit queue.') + '</div>';
+    } else {
+      msg.innerHTML = '<div class="success">Updated in Lightspeed.</div>';
+    }
     await load();
   } else if (resp.status === 409) {
     msg.innerHTML = '<div class="success">' + escape(data.detail || 'Product removed from audit cache.') + '</div>';
