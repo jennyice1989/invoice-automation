@@ -125,6 +125,25 @@ class CatalogSyncResult:
     total: int
     upserted: int
     synced_at: datetime
+    deactivated: int = 0
+
+
+def deactivate_missing_catalog_products(
+    cached_products: list[Any],
+    seen_ids: set[str],
+    synced_at: datetime,
+) -> int:
+    """Mark cached products inactive when they disappeared from latest sync."""
+    deactivated = 0
+    for row in cached_products:
+        if row.lightspeed_product_id in seen_ids:
+            continue
+        row.active = False
+        row.deleted_at = row.deleted_at or "missing_from_latest_sync"
+        row.synced_at = synced_at
+        row.updated_at = synced_at
+        deactivated += 1
+    return deactivated
 
 
 async def sync_lightspeed_catalog(
@@ -137,11 +156,13 @@ async def sync_lightspeed_catalog(
     synced_at = datetime.utcnow()
     products = await client.list_products()
     upserted = 0
+    seen_ids: set[str] = set()
 
     for product in products:
         if not product.get("id"):
             continue
         fields = product_to_cache_fields(product, synced_at)
+        seen_ids.add(fields["lightspeed_product_id"])
         existing = (await session.execute(
             select(CatalogProduct).where(
                 CatalogProduct.lightspeed_product_id == fields["lightspeed_product_id"]
@@ -154,8 +175,24 @@ async def sync_lightspeed_catalog(
             session.add(CatalogProduct(**fields))
         upserted += 1
 
+    deactivated = 0
+    if seen_ids:
+        cached_products = (await session.execute(
+            select(CatalogProduct).where(CatalogProduct.active.is_(True))
+        )).scalars().all()
+        deactivated = deactivate_missing_catalog_products(
+            list(cached_products),
+            seen_ids,
+            synced_at,
+        )
+
     await session.flush()
-    return CatalogSyncResult(total=len(products), upserted=upserted, synced_at=synced_at)
+    return CatalogSyncResult(
+        total=len(products),
+        upserted=upserted,
+        synced_at=synced_at,
+        deactivated=deactivated,
+    )
 
 
 async def upsert_cached_product(
