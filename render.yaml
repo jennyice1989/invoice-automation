@@ -1,6 +1,6 @@
 databases:
   - name: invoice-importer-db
-    plan: free
+    plan: basic-1gb
     databaseName: invoice_importer
     user: invoice_importer
 
