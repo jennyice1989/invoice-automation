@@ -36,7 +36,8 @@ from app.catalog import (
     upsert_cached_product,
 )
 from app.db import (
-    CatalogProduct, EnrichmentDraft, Invoice, InvoiceLine, PricingRule,
+    CatalogProduct, EnrichmentDraft, Invoice, InvoiceLine, LabelReprintQueue,
+    PricingRule,
     SupplierCatalogItem, SupplierMsrp, SupplierSkuMapping,
     find_existing_invoice, init_db, session_scope, upsert_mapping,
 )
@@ -375,6 +376,91 @@ async def admin_errors(session: AsyncSession = Depends(_session), limit: int = 2
     } for r in rows]}
 
 
+@app.get("/admin/label-reprints", dependencies=[Depends(require_auth)])
+async def admin_label_reprints(
+    status: str = "pending",
+    limit: int = 100,
+    session: AsyncSession = Depends(_session),
+):
+    limit = min(max(limit, 1), 500)
+    query = select(LabelReprintQueue).order_by(LabelReprintQueue.created_at.desc())
+    if status != "all":
+        query = query.where(LabelReprintQueue.status == status)
+    rows = (await session.execute(query.limit(limit))).scalars().all()
+    return {"data": [_label_reprint_to_dict(row) for row in rows]}
+
+
+@app.get("/admin/label-reprints.csv", dependencies=[Depends(require_auth)])
+async def export_label_reprints_csv(
+    status: str = "pending",
+    session: AsyncSession = Depends(_session),
+):
+    query = select(LabelReprintQueue).order_by(LabelReprintQueue.created_at.desc())
+    if status != "all":
+        query = query.where(LabelReprintQueue.status == status)
+    rows = (await session.execute(query)).scalars().all()
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([
+        "created_at", "product_name", "sku", "barcode", "supplier_code",
+        "old_price", "new_price", "lightspeed_product_id", "status",
+    ])
+    for row in rows:
+        writer.writerow([
+            row.created_at.isoformat() if row.created_at else "",
+            row.product_name or "",
+            row.sku or "",
+            row.barcode or "",
+            row.supplier_code or "",
+            "" if row.old_price is None else f"{row.old_price:.2f}",
+            f"{row.new_price:.2f}",
+            row.lightspeed_product_id,
+            row.status,
+        ])
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="label-reprints.csv"'},
+    )
+
+
+@app.post("/admin/label-reprints/mark-printed", dependencies=[Depends(require_auth)])
+async def mark_label_reprints_printed(
+    body: dict,
+    session: AsyncSession = Depends(_session),
+):
+    ids = [int(i) for i in body.get("ids", []) if str(i).isdigit()]
+    if not ids:
+        raise HTTPException(400, "Select at least one label row")
+    rows = (await session.execute(
+        select(LabelReprintQueue).where(LabelReprintQueue.id.in_(ids))
+    )).scalars().all()
+    now = datetime.utcnow()
+    for row in rows:
+        row.status = "printed"
+        row.printed_at = now
+    await session.flush()
+    return {"ok": True, "updated": len(rows)}
+
+
+def _label_reprint_to_dict(row: LabelReprintQueue) -> dict:
+    return {
+        "id": row.id,
+        "lightspeed_product_id": row.lightspeed_product_id,
+        "product_name": row.product_name,
+        "sku": row.sku,
+        "barcode": row.barcode,
+        "supplier_code": row.supplier_code,
+        "old_price": row.old_price,
+        "new_price": row.new_price,
+        "source": row.source,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "printed_at": row.printed_at.isoformat() if row.printed_at else None,
+    }
+
+
 @app.get("/admin/supplier-items", dependencies=[Depends(require_auth)])
 async def admin_supplier_items(
     q: str = "",
@@ -590,6 +676,29 @@ class AuditBulkApplyRequest(BaseModel):
     updates: list[AuditBulkApplyItem] = Field(default_factory=list)
 
 
+def _label_reprint_from_price_change(
+    product: CatalogProduct,
+    *,
+    product_id: str,
+    old_price: float | None,
+    new_price: float | None,
+) -> LabelReprintQueue | None:
+    if new_price is None:
+        return None
+    if old_price is not None and abs(float(old_price) - float(new_price)) < 0.005:
+        return None
+    return LabelReprintQueue(
+        lightspeed_product_id=product_id,
+        product_name=product.name,
+        sku=product.sku,
+        barcode=product.barcode,
+        supplier_code=product.supplier_code,
+        old_price=old_price,
+        new_price=float(new_price),
+        source="audit_price_approval",
+    )
+
+
 async def _find_live_audit_product(
     client: LightspeedClient,
     session: AsyncSession,
@@ -659,6 +768,8 @@ async def _apply_audit_product_update(
     if not update:
         raise HTTPException(400, "Nothing approved to update")
 
+    old_retail_price = product.retail_price
+    approved_retail_price = update.get("retail_price")
     try:
         client = _client()
         updated = await client.update_product(product_id, **update)
@@ -702,6 +813,14 @@ async def _apply_audit_product_update(
         product.updated_at = datetime.utcnow()
     else:
         await upsert_cached_product(session, updated)
+    label_row = _label_reprint_from_price_change(
+        product,
+        product_id=product_id,
+        old_price=old_retail_price,
+        new_price=approved_retail_price,
+    )
+    if label_row:
+        session.add(label_row)
     refreshed = (await session.execute(
         select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
     )).scalar_one_or_none()

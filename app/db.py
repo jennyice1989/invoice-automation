@@ -107,6 +107,25 @@ class CatalogProduct(Base):
     )
 
 
+class LabelReprintQueue(Base):
+    """Price changes that need shelf/product labels reprinted."""
+
+    __tablename__ = "label_reprint_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lightspeed_product_id: Mapped[str] = mapped_column(String(64), index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, index=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    supplier_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    old_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    new_price: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(64), default="audit_price_approval", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    printed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class SupplierCatalogItem(Base):
     """Supplier item memory, including products that are not in Lightspeed yet."""
 
@@ -412,6 +431,21 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS ix_catalog_products_barcode ON catalog_products(barcode)",
             "CREATE INDEX IF NOT EXISTS ix_catalog_products_supplier_code ON catalog_products(supplier_code)",
             "CREATE INDEX IF NOT EXISTS ix_catalog_products_normalized_name ON catalog_products(normalized_name)",
+            "CREATE TABLE IF NOT EXISTS label_reprint_queue (id SERIAL PRIMARY KEY)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS lightspeed_product_id VARCHAR(64)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS product_name VARCHAR(500)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS sku VARCHAR(255)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS barcode VARCHAR(255)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS old_price DOUBLE PRECISION",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS new_price DOUBLE PRECISION",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS source VARCHAR(64) DEFAULT 'audit_price_approval'",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'pending'",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+            "ALTER TABLE label_reprint_queue ADD COLUMN IF NOT EXISTS printed_at TIMESTAMP",
+            "CREATE INDEX IF NOT EXISTS ix_label_reprint_status ON label_reprint_queue(status)",
+            "CREATE INDEX IF NOT EXISTS ix_label_reprint_created_at ON label_reprint_queue(created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_label_reprint_product_id ON label_reprint_queue(lightspeed_product_id)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_id VARCHAR(64)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(500)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",

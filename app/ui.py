@@ -1378,6 +1378,20 @@ ADMIN_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <h2>Labels to reprint</h2>
+    <div class="toolbar">
+      <select id="labelStatus" onchange="loadLabelReprints()">
+        <option value="pending">Pending</option>
+        <option value="printed">Printed</option>
+        <option value="all">All</option>
+      </select>
+      <a class="secondary" id="labelCsv" href="/admin/label-reprints.csv">Export CSV</a>
+      <button class="primary" onclick="markLabelsPrinted()">Mark selected printed</button>
+    </div>
+    <div id="labelBox" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
     <h2>Supplier catalog PDFs</h2>
     <div class="toolbar">
       <select id="catalogSupplier"></select>
@@ -1500,6 +1514,37 @@ async function loadErrors() {
   document.getElementById('errorsBox').innerHTML = h;
 }
 
+async function loadLabelReprints() {
+  const status = document.getElementById('labelStatus').value;
+  document.getElementById('labelCsv').href = '/admin/label-reprints.csv?status=' + encodeURIComponent(status);
+  const data = await api('/admin/label-reprints?status=' + encodeURIComponent(status));
+  if (!data.data.length) {
+    document.getElementById('labelBox').innerHTML = '<span class="muted">No label reprints.</span>';
+    return;
+  }
+  let h = '<table><thead><tr><th></th><th>Product</th><th>SKU / Barcode</th><th>Price change</th><th>When</th></tr></thead><tbody>';
+  data.data.forEach(r => {
+    h += '<tr><td><input type="checkbox" class="label-select" value="' + r.id + '" /></td>'
+      + '<td><strong>' + escape(r.product_name || '') + '</strong><br><small>' + escape(r.lightspeed_product_id || '') + '</small></td>'
+      + '<td>' + escape(r.sku || '') + '<br><small>' + escape(r.barcode || '') + '</small></td>'
+      + '<td>' + money(r.old_price) + ' → <strong>' + money(r.new_price) + '</strong><br><small>' + escape(r.status || '') + '</small></td>'
+      + '<td>' + escape(r.created_at ? new Date(r.created_at).toLocaleString() : '') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('labelBox').innerHTML = h;
+}
+
+async function markLabelsPrinted() {
+  const ids = Array.from(document.querySelectorAll('.label-select:checked')).map(cb => parseInt(cb.value));
+  if (!ids.length) { alert('Select at least one label row.'); return; }
+  await api('/admin/label-reprints/mark-printed', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ ids }),
+  });
+  loadLabelReprints();
+}
+
 async function loadMemory() {
   const q = document.getElementById('memoryQ').value.trim();
   const data = await api('/admin/supplier-items?q=' + encodeURIComponent(q));
@@ -1547,12 +1592,15 @@ async function deleteMapping(id) {
 function meta(label, value) {
   return '<div><label>' + escape(label) + '</label><span>' + escape(value) + '</span></div>';
 }
+function money(value) {
+  return value == null ? '—' : '$' + Number(value).toFixed(2);
+}
 function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 function escAttr(s) { return escape(s); }
 
-loadStatus(); loadSupplierOptions(); loadErrors(); loadMemory(); loadMappings();
+loadStatus(); loadSupplierOptions(); loadErrors(); loadLabelReprints(); loadMemory(); loadMappings();
 </script>
 </body></html>"""
 
