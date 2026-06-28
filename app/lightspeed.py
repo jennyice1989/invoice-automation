@@ -816,7 +816,14 @@ class LightspeedClient:
             data = await self._request(
                 "PUT", f"/products/{product_id}", json=payload
             )
-            return data.get("data", data)
+            if not data:
+                return await self.get_product(product_id)
+            product = self._unwrap_product_response(data, context="product update")
+            if isinstance(product, dict):
+                return product
+            if _UUID_RE.match(product.strip()):
+                return await self.get_product(product.strip())
+            return await self.get_product(product_id)
         except LightspeedNotFoundError:
             logger.warning(
                 "Skipping update for product %s (404 — likely deleted)",

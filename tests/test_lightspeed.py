@@ -394,6 +394,36 @@ async def test_create_product_reports_unexpected_string_response(client_factory)
 
 
 @pytest.mark.asyncio
+async def test_update_product_fetches_product_when_response_is_empty(client_factory):
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(204)
+        if request.method == "GET" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "name": "Updated Product",
+                "description": "Updated description",
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.update_product(
+        "prod-1",
+        description="Updated description",
+    )
+
+    assert calls == [
+        ("PUT", "/api/2.0/products/prod-1"),
+        ("GET", "/api/2.0/products/prod-1"),
+    ]
+    assert product["description"] == "Updated description"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_upload_product_image_posts_multipart_without_json_content_type(client_factory):
     captured: dict[str, Any] = {}
 
