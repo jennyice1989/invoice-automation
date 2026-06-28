@@ -467,6 +467,9 @@ async function applyUpdate(id, body) {
   if (resp.ok) {
     msg.innerHTML = '<div class="success">Updated in Lightspeed.</div>';
     await load();
+  } else if (resp.status === 409) {
+    msg.innerHTML = '<div class="success">' + escape(data.detail || 'Product removed from audit cache.') + '</div>';
+    await load();
   } else {
     msg.innerHTML = '<div class="error">' + escape(data.detail || resp.statusText) + '</div>';
   }
