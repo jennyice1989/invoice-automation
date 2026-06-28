@@ -618,9 +618,26 @@ async def apply_audit_product_update(
     except LightspeedError as exc:
         raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
     if not updated:
-        raise HTTPException(502, "Lightspeed did not update the product")
+        raise HTTPException(
+            502,
+            "Lightspeed could not update this product. It may be archived, "
+            "deleted, or unavailable to the API token.",
+        )
 
-    await upsert_cached_product(session, updated)
+    partial_update = updated.get("_partial_update") if isinstance(updated, dict) else None
+    if partial_update:
+        raw = dict(product.raw or {})
+        raw.update(partial_update)
+        product.raw = raw
+        if "price_excluding_tax" in partial_update:
+            product.retail_price = partial_update["price_excluding_tax"]
+        if "supply_price" in partial_update:
+            product.supply_price = partial_update["supply_price"]
+        if "supplier_code" in partial_update:
+            product.supplier_code = partial_update["supplier_code"]
+        product.updated_at = datetime.utcnow()
+    else:
+        await upsert_cached_product(session, updated)
     refreshed = (await session.execute(
         select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
     )).scalar_one_or_none()

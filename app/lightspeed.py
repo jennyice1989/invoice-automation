@@ -816,20 +816,34 @@ class LightspeedClient:
             data = await self._request(
                 "PUT", f"/products/{product_id}", json=payload
             )
-            if not data:
-                return await self.get_product(product_id)
-            product = self._unwrap_product_response(data, context="product update")
-            if isinstance(product, dict):
-                return product
-            if _UUID_RE.match(product.strip()):
-                return await self.get_product(product.strip())
-            return await self.get_product(product_id)
         except LightspeedNotFoundError:
             logger.warning(
                 "Skipping update for product %s (404 — likely deleted)",
                 product_id,
             )
             return None
+        if not data:
+            try:
+                return await self.get_product(product_id)
+            except LightspeedError:
+                logger.info(
+                    "Product %s update returned no body and refetch failed; "
+                    "treating the accepted update as partial success",
+                    product_id,
+                )
+                return {"id": product_id, "_partial_update": payload}
+        product = self._unwrap_product_response(data, context="product update")
+        if isinstance(product, dict):
+            return product
+        if _UUID_RE.match(product.strip()):
+            try:
+                return await self.get_product(product.strip())
+            except LightspeedError:
+                return {"id": product_id, "_partial_update": payload}
+        try:
+            return await self.get_product(product_id)
+        except LightspeedError:
+            return {"id": product_id, "_partial_update": payload}
 
     async def upload_product_image(
         self,
