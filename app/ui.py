@@ -330,7 +330,8 @@ AUDIT_HTML = """<!DOCTYPE html>
       <option value="missing_price">Missing price</option>
       <option value="missing_barcode">Missing barcode</option>
       <option value="missing_sku">Missing SKU</option>
-      <option value="missing_barcode_sku">Missing barcode/SKU</option>
+      <option value="generated_sku">Generated/internal SKU</option>
+      <option value="missing_barcode_sku">Missing both barcode/SKU</option>
       <option value="missing_brand">Missing brand</option>
       <option value="missing_category">Missing category</option>
     </select>
@@ -400,6 +401,7 @@ function renderSummary(s, shown, issue) {
     ['Below target', s.below_target_margin || 0],
     ['Missing barcodes', s.missing_barcode || 0],
     ['Missing SKUs', s.missing_sku || 0],
+    ['Generated SKUs', s.generated_sku || 0],
     ['Missing codes', s.missing_barcode_sku || 0],
   ];
   document.getElementById('summary').innerHTML = items.map(([label, value]) =>
@@ -430,10 +432,10 @@ function renderProduct(p) {
     + escape(p.suggested_custom_sku || '') + '" />'
     + '<button class="primary" onclick="applySku(\\'' + p.id + '\\')">Assign SKU</button></div></div>'
   );
-  const barcodeSkuControls = (!p.barcode || isGeneratedSku(p.sku)) ? (
+  const barcodeSkuControls = (!p.barcode || p.is_generated_sku) ? (
     '<div style="margin-top:12px"><h2>Barcode/SKU</h2>'
     + '<div class="price-box"><input type="text" id="barcode-sku-' + p.id + '" value="'
-    + escape(isGeneratedSku(p.sku) ? '' : (p.barcode || p.sku || '')) + '" placeholder="Scan or type barcode" />'
+    + escape(p.is_generated_sku ? '' : (p.barcode || p.sku || '')) + '" placeholder="Scan or type barcode" />'
     + '<button class="primary" onclick="applyBarcodeSku(\\'' + p.id + '\\')">Update barcode/SKU</button></div></div>'
   ) : '';
   return '<div class="audit-row" id="row-' + p.id + '">'
@@ -463,10 +465,6 @@ function renderProduct(p) {
     + barcodeSkuControls
     + '<div id="msg-' + p.id + '" style="margin-top:10px"></div>'
     + '</div></div></div>';
-}
-
-function isGeneratedSku(sku) {
-  return String(sku || '').toUpperCase().startsWith('CUSTOM-');
 }
 
 function selectedProductIds() {

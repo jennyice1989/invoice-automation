@@ -16,6 +16,7 @@ from app.pricing import _round
 TARGET_MARGIN_MULTIPLIER = 1.5
 TARGET_ROUNDING = "cents_49_99"
 CUSTOM_SKU_PREFIX = "CUSTOM"
+BARCODE_SKU_LENGTHS = {8, 12, 13, 14}
 
 
 @dataclass
@@ -92,6 +93,23 @@ def custom_sku_for_product(product: CatalogProduct) -> str:
     return f"{CUSTOM_SKU_PREFIX}-{token or 'PRODUCT'}"
 
 
+def sku_looks_like_barcode(sku: str | None) -> bool:
+    value = (sku or "").strip()
+    return value.isdigit() and len(value) in BARCODE_SKU_LENGTHS
+
+
+def is_generated_sku(sku: str | None, barcode: str | None = None) -> bool:
+    value = (sku or "").strip()
+    if not value:
+        return False
+    if value.upper().startswith(f"{CUSTOM_SKU_PREFIX}-"):
+        return True
+    barcode_value = (barcode or "").strip()
+    if barcode_value and value == barcode_value:
+        return False
+    return not sku_looks_like_barcode(value)
+
+
 def audit_product(product: CatalogProduct) -> dict[str, Any]:
     raw = product.raw or {}
     description = _raw_description(raw)
@@ -136,6 +154,10 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         issues.append(AuditIssue(
             "missing_sku", "Missing SKU", "medium",
         ))
+    elif is_generated_sku(product.sku, product.barcode):
+        issues.append(AuditIssue(
+            "generated_sku", "Generated/internal SKU", "medium",
+        ))
     if not product.brand_name:
         issues.append(AuditIssue(
             "missing_brand", "Missing brand", "low",
@@ -152,6 +174,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         "id": product.lightspeed_product_id,
         "name": product.name,
         "sku": product.sku,
+        "is_generated_sku": is_generated_sku(product.sku, product.barcode),
         "suggested_custom_sku": custom_sku_for_product(product) if not product.sku else None,
         "barcode": product.barcode,
         "supplier_code": product.supplier_code,
@@ -216,6 +239,7 @@ async def audit_catalog(
         "missing_barcode_sku": 0,
         "missing_barcode": 0,
         "missing_sku": 0,
+        "generated_sku": 0,
         "missing_brand": 0,
         "missing_category": 0,
     }

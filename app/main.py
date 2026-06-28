@@ -27,7 +27,7 @@ from app.auth import (
     make_token, require_auth, require_auth_html,
 )
 from app.audit import (
-    CUSTOM_SKU_PREFIX, audit_catalog, audit_product, custom_sku_for_product,
+    audit_catalog, audit_product, custom_sku_for_product, is_generated_sku,
     target_price_for_cost,
 )
 from app.catalog import (
@@ -465,7 +465,7 @@ def _label_reprint_to_dict(row: LabelReprintQueue) -> dict:
 
 
 def _is_generated_sku(sku: str | None) -> bool:
-    return bool((sku or "").strip().upper().startswith(f"{CUSTOM_SKU_PREFIX}-"))
+    return is_generated_sku(sku)
 
 
 def _generated_sku_to_dict(row: CatalogProduct) -> dict:
@@ -491,7 +491,6 @@ async def admin_generated_skus(
     query = (
         select(CatalogProduct)
         .where(CatalogProduct.active.is_(True))
-        .where(func.lower(CatalogProduct.sku).like(f"{CUSTOM_SKU_PREFIX.lower()}-%"))
         .order_by(CatalogProduct.name.asc())
     )
     needle = q.strip().lower()
@@ -503,8 +502,9 @@ async def admin_generated_skus(
             func.lower(CatalogProduct.barcode).like(like),
             func.lower(CatalogProduct.supplier_code).like(like),
         ))
-    rows = (await session.execute(query.limit(limit))).scalars().all()
-    return {"data": [_generated_sku_to_dict(row) for row in rows]}
+    rows = (await session.execute(query)).scalars().all()
+    generated = [row for row in rows if is_generated_sku(row.sku, row.barcode)]
+    return {"data": [_generated_sku_to_dict(row) for row in generated[:limit]]}
 
 
 @app.get("/admin/generated-skus.csv", dependencies=[Depends(require_auth)])
@@ -514,9 +514,9 @@ async def export_generated_skus_csv(
     rows = (await session.execute(
         select(CatalogProduct)
         .where(CatalogProduct.active.is_(True))
-        .where(func.lower(CatalogProduct.sku).like(f"{CUSTOM_SKU_PREFIX.lower()}-%"))
         .order_by(CatalogProduct.name.asc())
     )).scalars().all()
+    rows = [row for row in rows if is_generated_sku(row.sku, row.barcode)]
 
     out = io.StringIO()
     writer = csv.writer(out)
@@ -555,8 +555,8 @@ async def update_generated_sku(
     )).scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found in local catalog cache")
-    if not _is_generated_sku(product.sku):
-        raise HTTPException(400, "Product does not have a generated CUSTOM- SKU")
+    if not is_generated_sku(product.sku, product.barcode):
+        raise HTTPException(400, "Product does not have a generated/internal SKU")
 
     try:
         updated = await _client().update_product(

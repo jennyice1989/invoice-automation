@@ -4,6 +4,8 @@ from app.audit import (
     audit_item_matches_filter,
     audit_product,
     custom_sku_for_product,
+    is_generated_sku,
+    sku_looks_like_barcode,
     target_price_for_cost,
 )
 from app.db import CatalogProduct
@@ -99,6 +101,21 @@ def test_audit_flags_missing_barcode_when_sku_exists():
     assert "missing_sku" not in codes
     assert "missing_barcode_sku" not in codes
     assert audit_item_matches_filter(result, issue="missing_barcode")
+
+
+def test_audit_flags_short_numeric_sku_as_generated():
+    result = audit_product(_product(sku="10558", barcode=None))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert "generated_sku" in codes
+    assert result["is_generated_sku"] is True
+    assert audit_item_matches_filter(result, issue="generated_sku")
+
+
+def test_sku_looks_like_barcode_for_real_barcode_lengths():
+    assert sku_looks_like_barcode("000116768702")
+    assert is_generated_sku("10558") is True
+    assert is_generated_sku("000116768702") is False
 
 
 def test_audit_item_matches_issue_and_search_filters():
