@@ -328,6 +328,7 @@ AUDIT_HTML = """<!DOCTYPE html>
       <option value="missing_photo">Missing photo</option>
       <option value="below_target_margin">Below target margin</option>
       <option value="missing_price">Missing price</option>
+      <option value="missing_barcode">Missing barcode</option>
       <option value="missing_sku">Missing SKU</option>
       <option value="missing_barcode_sku">Missing barcode/SKU</option>
       <option value="missing_brand">Missing brand</option>
@@ -396,6 +397,7 @@ function renderSummary(s, shown, issue) {
     ['Missing photos', s.missing_photo || 0],
     ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
     ['Below target', s.below_target_margin || 0],
+    ['Missing barcodes', s.missing_barcode || 0],
     ['Missing SKUs', s.missing_sku || 0],
     ['Missing codes', s.missing_barcode_sku || 0],
   ];

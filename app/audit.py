@@ -128,6 +128,10 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         issues.append(AuditIssue(
             "missing_barcode_sku", "Missing barcode/SKU", "medium",
         ))
+    if not product.barcode:
+        issues.append(AuditIssue(
+            "missing_barcode", "Missing barcode", "medium",
+        ))
     if not product.sku:
         issues.append(AuditIssue(
             "missing_sku", "Missing SKU", "medium",
@@ -210,6 +214,7 @@ async def audit_catalog(
         "below_target_margin": 0,
         "missing_price": 0,
         "missing_barcode_sku": 0,
+        "missing_barcode": 0,
         "missing_sku": 0,
         "missing_brand": 0,
         "missing_category": 0,

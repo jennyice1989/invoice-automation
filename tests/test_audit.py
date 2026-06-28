@@ -91,6 +91,16 @@ def test_audit_flags_missing_sku_and_suggests_custom_sku():
     assert custom_sku_for_product(product) == "CUSTOM-6D3E8AE2BB"
 
 
+def test_audit_flags_missing_barcode_when_sku_exists():
+    result = audit_product(_product(sku="SKU1", barcode=None))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert "missing_barcode" in codes
+    assert "missing_sku" not in codes
+    assert "missing_barcode_sku" not in codes
+    assert audit_item_matches_filter(result, issue="missing_barcode")
+
+
 def test_audit_item_matches_issue_and_search_filters():
     missing_photo = audit_product(_product(
         name="Aquatop Magnet Cleaner",
