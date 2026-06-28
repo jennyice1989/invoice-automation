@@ -787,6 +787,8 @@ class AuditApplyRequest(BaseModel):
     description: str | None = None
     approve_sku: bool = False
     custom_sku: str | None = None
+    approve_barcode_sku: bool = False
+    barcode_sku: str | None = None
 
 
 class AuditBulkDraftRequest(BaseModel):
@@ -898,6 +900,13 @@ async def _apply_audit_product_update(
             raise HTTPException(400, "Product already has a SKU")
         update["sku"] = custom_sku
 
+    if body.approve_barcode_sku:
+        barcode_sku = (body.barcode_sku or "").strip()
+        if not barcode_sku:
+            raise HTTPException(400, "Approved barcode/SKU is empty")
+        update["sku"] = barcode_sku
+        update["barcode"] = barcode_sku
+
     if not update:
         raise HTTPException(400, "Nothing approved to update")
 
@@ -945,6 +954,8 @@ async def _apply_audit_product_update(
             product.supplier_code = partial_update["supplier_code"]
         if "sku" in partial_update:
             product.sku = partial_update["sku"]
+        if "barcode" in partial_update:
+            product.barcode = partial_update["barcode"]
         product.updated_at = datetime.utcnow()
     else:
         await upsert_cached_product(session, updated)

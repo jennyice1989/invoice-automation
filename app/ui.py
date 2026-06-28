@@ -343,6 +343,7 @@ AUDIT_HTML = """<!DOCTYPE html>
     <button class="primary" id="bulkDescBtn" onclick="bulkApplyDescriptions()">Approve selected descriptions</button>
     <button class="primary" id="bulkPriceBtn" onclick="bulkApplyPrices()">Approve selected prices</button>
     <button class="primary" id="bulkSkuBtn" onclick="bulkApplySkus()">Assign selected SKUs</button>
+    <button class="primary" id="bulkBarcodeSkuBtn" onclick="bulkApplyBarcodeSkus()">Update selected barcode/SKUs</button>
   </div>
   <div id="bulkMsg"></div>
 
@@ -429,6 +430,12 @@ function renderProduct(p) {
     + escape(p.suggested_custom_sku || '') + '" />'
     + '<button class="primary" onclick="applySku(\\'' + p.id + '\\')">Assign SKU</button></div></div>'
   );
+  const barcodeSkuControls = (!p.barcode || isGeneratedSku(p.sku)) ? (
+    '<div style="margin-top:12px"><h2>Barcode/SKU</h2>'
+    + '<div class="price-box"><input type="text" id="barcode-sku-' + p.id + '" value="'
+    + escape(isGeneratedSku(p.sku) ? '' : (p.barcode || p.sku || '')) + '" placeholder="Scan or type barcode" />'
+    + '<button class="primary" onclick="applyBarcodeSku(\\'' + p.id + '\\')">Update barcode/SKU</button></div></div>'
+  ) : '';
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
     + '<h2><label class="opt"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
@@ -453,8 +460,13 @@ function renderProduct(p) {
     + 'onchange="uploadImage(\\'' + p.id + '\\', this.files[0])" />'
     + '<div class="audit-meta">Use supplier/manufacturer images or licensed files only.</div></div>'
     + skuControls
+    + barcodeSkuControls
     + '<div id="msg-' + p.id + '" style="margin-top:10px"></div>'
     + '</div></div></div>';
+}
+
+function isGeneratedSku(sku) {
+  return String(sku || '').toUpperCase().startsWith('CUSTOM-');
 }
 
 function selectedProductIds() {
@@ -477,7 +489,7 @@ function enforceBulkLimit(changed) {
 }
 
 function setBulkBusy(busy) {
-  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkSkuBtn', 'syncBtn'].forEach(id => {
+  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkSkuBtn', 'bulkBarcodeSkuBtn', 'syncBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = busy;
   });
@@ -577,6 +589,28 @@ async function bulkApplySkus() {
   await bulkApply(updates, 'SKU');
 }
 
+async function bulkApplyBarcodeSkus() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
+  const updates = [];
+  for (const id of ids) {
+    const field = document.getElementById('barcode-sku-' + id);
+    if (!field) {
+      showItemMessage(id, 'No barcode/SKU update needed for this product.', 'error');
+      continue;
+    }
+    const value = field.value.trim();
+    if (!value) {
+      showItemMessage(id, 'Enter the barcode/SKU.', 'error');
+      continue;
+    }
+    updates.push({ product_id: id, approve_barcode_sku: true, barcode_sku: value });
+  }
+  if (!updates.length) { showBulk('No selected products have barcode/SKU values ready.', 'error'); return; }
+  await bulkApply(updates, 'barcode/SKU');
+}
+
 async function bulkApply(updates, label) {
   setBulkBusy(true);
   showBulk('Applying ' + updates.length + ' ' + label + ' update(s)...', 'success');
@@ -634,6 +668,12 @@ async function applySku(id) {
   const sku = (document.getElementById('sku-' + id) || {}).value || '';
   if (!sku.trim()) { alert('Enter a custom SKU.'); return; }
   await applyUpdate(id, { approve_sku: true, custom_sku: sku.trim() });
+}
+
+async function applyBarcodeSku(id) {
+  const value = (document.getElementById('barcode-sku-' + id) || {}).value || '';
+  if (!value.trim()) { alert('Enter the barcode/SKU.'); return; }
+  await applyUpdate(id, { approve_barcode_sku: true, barcode_sku: value.trim() });
 }
 
 async function applyUpdate(id, body) {
