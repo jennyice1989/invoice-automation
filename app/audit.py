@@ -41,19 +41,40 @@ def _raw_description(raw: dict | None) -> str | None:
     return None
 
 
+def _looks_like_image_key(key: str) -> bool:
+    key = key.lower()
+    return any(token in key for token in ("image", "photo", "media", "thumbnail"))
+
+
+def _image_value_present(value) -> bool:
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, str):
+        text = value.strip()
+        return bool(text and text.lower() not in {"none", "null"})
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, list):
+        return any(_image_value_present(item) for item in value)
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _looks_like_image_key(str(key)) or str(key).lower() in {
+                "id", "url", "src", "href", "original", "standard", "thumb",
+                "thumbnail", "filename", "file_name",
+            }:
+                if _image_value_present(child):
+                    return True
+        return False
+    return False
+
+
 def _raw_has_image(raw: dict | None) -> bool:
     if not raw:
         return False
-    for key in ("image_url", "image_thumbnail_url", "thumbnail_url"):
-        if raw.get(key):
-            return True
-    for key in ("images", "image"):
-        value = raw.get(key)
-        if isinstance(value, list) and value:
-            return True
-        if isinstance(value, dict) and value:
-            return True
-        if isinstance(value, str) and value.strip():
+    for key, value in raw.items():
+        if _looks_like_image_key(str(key)) and _image_value_present(value):
             return True
     return False
 

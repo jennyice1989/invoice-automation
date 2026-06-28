@@ -651,6 +651,12 @@ async def draft_audit_description(
             available_brands=[],
         )
     except EnrichmentError as exc:
+        if "OPENAI_API_KEY" in str(exc):
+            raise HTTPException(
+                503,
+                "OpenAI is not configured. Add OPENAI_API_KEY to the Render "
+                "service environment variables, then redeploy or restart the service.",
+            ) from exc
         raise HTTPException(502, f"OpenAI description draft failed: {exc}") from exc
     return {
         "ok": True,

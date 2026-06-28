@@ -55,3 +55,22 @@ def test_audit_accepts_description_and_image_fields():
     assert "weak_description" not in codes
     assert "missing_photo" not in codes
     assert "below_target_margin" not in codes
+
+
+def test_audit_flags_empty_image_placeholders_as_missing_photo():
+    result = audit_product(_product(
+        retail_price=19.99,
+        raw={
+            "description": (
+                "<p>This is a complete product description with enough useful "
+                "detail for a product page. It explains what the item is, "
+                "who it is for, and why a customer would choose it.</p>"
+            ),
+            "image": {"url": None, "thumbnail": ""},
+            "images": [],
+        },
+    ))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert result["has_image"] is False
+    assert "missing_photo" in codes
