@@ -27,7 +27,8 @@ from app.auth import (
     make_token, require_auth, require_auth_html,
 )
 from app.audit import (
-    audit_catalog, audit_product, custom_sku_for_product, target_price_for_cost,
+    CUSTOM_SKU_PREFIX, audit_catalog, audit_product, custom_sku_for_product,
+    target_price_for_cost,
 )
 from app.catalog import (
     catalog_status,
@@ -461,6 +462,126 @@ def _label_reprint_to_dict(row: LabelReprintQueue) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "printed_at": row.printed_at.isoformat() if row.printed_at else None,
     }
+
+
+def _is_generated_sku(sku: str | None) -> bool:
+    return bool((sku or "").strip().upper().startswith(f"{CUSTOM_SKU_PREFIX}-"))
+
+
+def _generated_sku_to_dict(row: CatalogProduct) -> dict:
+    return {
+        "id": row.lightspeed_product_id,
+        "name": row.name,
+        "sku": row.sku,
+        "barcode": row.barcode,
+        "supplier_code": row.supplier_code,
+        "brand_name": row.brand_name,
+        "category_name": row.category_name,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.get("/admin/generated-skus", dependencies=[Depends(require_auth)])
+async def admin_generated_skus(
+    q: str = "",
+    limit: int = 100,
+    session: AsyncSession = Depends(_session),
+):
+    limit = min(max(limit, 1), 500)
+    query = (
+        select(CatalogProduct)
+        .where(CatalogProduct.active.is_(True))
+        .where(func.lower(CatalogProduct.sku).like(f"{CUSTOM_SKU_PREFIX.lower()}-%"))
+        .order_by(CatalogProduct.name.asc())
+    )
+    needle = q.strip().lower()
+    if needle:
+        like = f"%{needle}%"
+        query = query.where(or_(
+            func.lower(CatalogProduct.name).like(like),
+            func.lower(CatalogProduct.sku).like(like),
+            func.lower(CatalogProduct.barcode).like(like),
+            func.lower(CatalogProduct.supplier_code).like(like),
+        ))
+    rows = (await session.execute(query.limit(limit))).scalars().all()
+    return {"data": [_generated_sku_to_dict(row) for row in rows]}
+
+
+@app.get("/admin/generated-skus.csv", dependencies=[Depends(require_auth)])
+async def export_generated_skus_csv(
+    session: AsyncSession = Depends(_session),
+):
+    rows = (await session.execute(
+        select(CatalogProduct)
+        .where(CatalogProduct.active.is_(True))
+        .where(func.lower(CatalogProduct.sku).like(f"{CUSTOM_SKU_PREFIX.lower()}-%"))
+        .order_by(CatalogProduct.name.asc())
+    )).scalars().all()
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([
+        "product_name", "generated_sku", "current_barcode", "supplier_code",
+        "brand", "category", "lightspeed_product_id",
+    ])
+    for row in rows:
+        writer.writerow([
+            row.name or "",
+            row.sku or "",
+            row.barcode or "",
+            row.supplier_code or "",
+            row.brand_name or "",
+            row.category_name or "",
+            row.lightspeed_product_id,
+        ])
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="generated-skus.csv"'},
+    )
+
+
+@app.post("/admin/generated-skus/{product_id}/update", dependencies=[Depends(require_auth)])
+async def update_generated_sku(
+    product_id: str,
+    body: dict,
+    session: AsyncSession = Depends(_session),
+):
+    real_sku = str(body.get("sku") or "").strip()
+    if not real_sku:
+        raise HTTPException(400, "Enter the real barcode/SKU")
+    product = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found in local catalog cache")
+    if not _is_generated_sku(product.sku):
+        raise HTTPException(400, "Product does not have a generated CUSTOM- SKU")
+
+    try:
+        updated = await _client().update_product(
+            product_id,
+            sku=real_sku,
+            barcode=real_sku,
+        )
+    except LightspeedError as exc:
+        raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
+    if not updated:
+        raise HTTPException(404, "Lightspeed could not find this product for updates")
+    partial_update = updated.get("_partial_update") if isinstance(updated, dict) else None
+    if partial_update:
+        product.sku = real_sku
+        product.barcode = real_sku
+        raw = dict(product.raw or {})
+        raw.update({"sku": real_sku, "barcode": real_sku})
+        product.raw = raw
+        product.updated_at = datetime.utcnow()
+    else:
+        await upsert_cached_product(session, updated)
+    refreshed = (await session.execute(
+        select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
+    )).scalar_one_or_none()
+    return {"ok": True, "product": _generated_sku_to_dict(refreshed or product)}
 
 
 @app.get("/admin/supplier-items", dependencies=[Depends(require_auth)])

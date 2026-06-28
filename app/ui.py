@@ -1432,6 +1432,16 @@ ADMIN_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <h2>Generated SKUs</h2>
+    <div class="toolbar">
+      <input id="generatedSkuQ" type="text" placeholder="Search product, generated SKU, supplier code" />
+      <button class="secondary" onclick="loadGeneratedSkus()">Search</button>
+      <a class="secondary" href="/admin/generated-skus.csv">Export CSV</a>
+    </div>
+    <div id="generatedSkuBox" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
     <h2>Supplier catalog PDFs</h2>
     <div class="toolbar">
       <select id="catalogSupplier"></select>
@@ -1585,6 +1595,39 @@ async function markLabelsPrinted() {
   loadLabelReprints();
 }
 
+async function loadGeneratedSkus() {
+  const q = document.getElementById('generatedSkuQ').value.trim();
+  const data = await api('/admin/generated-skus?q=' + encodeURIComponent(q));
+  if (!data.data.length) {
+    document.getElementById('generatedSkuBox').innerHTML = '<span class="muted">No generated SKUs.</span>';
+    return;
+  }
+  let h = '<table><thead><tr><th>Product</th><th>Generated SKU</th><th>Current barcode</th><th>Real barcode/SKU</th><th></th></tr></thead><tbody>';
+  data.data.forEach(r => {
+    h += '<tr><td><strong>' + escape(r.name || '') + '</strong><br><small>'
+      + escape(r.brand_name || '') + ' ' + escape(r.category_name || '') + '</small><br><small>'
+      + escape(r.id || '') + '</small></td>'
+      + '<td>' + escape(r.sku || '') + '</td>'
+      + '<td>' + escape(r.barcode || '') + '</td>'
+      + '<td><input id="real-sku-' + escAttr(r.id) + '" type="text" placeholder="Scan or type barcode" /></td>'
+      + '<td><button class="primary" onclick="updateGeneratedSku(\\'' + escAttr(r.id) + '\\')">Update</button></td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('generatedSkuBox').innerHTML = h;
+}
+
+async function updateGeneratedSku(id) {
+  const input = document.getElementById('real-sku-' + id);
+  const sku = (input ? input.value : '').trim();
+  if (!sku) { alert('Enter the real barcode/SKU.'); return; }
+  await api('/admin/generated-skus/' + encodeURIComponent(id) + '/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ sku }),
+  });
+  loadGeneratedSkus();
+}
+
 async function loadMemory() {
   const q = document.getElementById('memoryQ').value.trim();
   const data = await api('/admin/supplier-items?q=' + encodeURIComponent(q));
@@ -1640,7 +1683,7 @@ function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => 
 })[c]); }
 function escAttr(s) { return escape(s); }
 
-loadStatus(); loadSupplierOptions(); loadErrors(); loadLabelReprints(); loadMemory(); loadMappings();
+loadStatus(); loadSupplierOptions(); loadErrors(); loadLabelReprints(); loadGeneratedSkus(); loadMemory(); loadMappings();
 </script>
 </body></html>"""
 

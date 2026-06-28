@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.db import CatalogProduct
-from app.main import _label_reprint_from_price_change
+from app.main import _is_generated_sku, _label_reprint_from_price_change
 
 
 def test_label_reprint_is_created_for_changed_price():
@@ -39,3 +39,10 @@ def test_label_reprint_is_skipped_for_same_price():
     )
 
     assert row is None
+
+
+def test_is_generated_sku_detects_custom_prefix_only():
+    assert _is_generated_sku("CUSTOM-ABC123")
+    assert _is_generated_sku("custom-abc123")
+    assert not _is_generated_sku("000116768702")
+    assert not _is_generated_sku(None)
