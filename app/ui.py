@@ -335,6 +335,13 @@ AUDIT_HTML = """<!DOCTYPE html>
     <button class="secondary" onclick="load()">Search</button>
     <button class="primary" id="syncBtn" onclick="syncCatalog()">Sync catalog</button>
   </div>
+  <div class="toolbar">
+    <label class="opt"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" /> Select all visible</label>
+    <button class="secondary" id="bulkDraftBtn" onclick="bulkDraftDescriptions()">Draft selected descriptions</button>
+    <button class="primary" id="bulkDescBtn" onclick="bulkApplyDescriptions()">Approve selected descriptions</button>
+    <button class="primary" id="bulkPriceBtn" onclick="bulkApplyPrices()">Approve selected prices</button>
+  </div>
+  <div id="bulkMsg"></div>
 
   <div id="summary" class="summary"></div>
   <div id="content"><p style="color:var(--muted)">Loading...</p></div>
@@ -357,6 +364,7 @@ async function load() {
     return;
   }
   PRODUCTS = data.data || [];
+  document.getElementById('selectAll').checked = false;
   renderSummary(data.summary || {});
   renderProducts();
 }
@@ -407,7 +415,8 @@ function renderProduct(p) {
   const target = p.target_price == null ? '—' : '$' + p.target_price.toFixed(2);
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
-    + '<h2>' + escape(p.name || '(unnamed product)') + '</h2>'
+    + '<h2><label class="opt"><input type="checkbox" class="product-select" value="' + escape(p.id) + '" /> '
+    + escape(p.name || '(unnamed product)') + '</label></h2>'
     + '<div class="audit-meta">'
     + 'SKU ' + escape(p.sku || '—') + ' · Barcode ' + escape(p.barcode || '—')
     + ' · Brand ' + escape(p.brand_name || '—') + ' · Category ' + escape(p.category_name || '—')
@@ -429,6 +438,119 @@ function renderProduct(p) {
     + '<div class="audit-meta">Use supplier/manufacturer images or licensed files only.</div></div>'
     + '<div id="msg-' + p.id + '" style="margin-top:10px"></div>'
     + '</div></div></div>';
+}
+
+function selectedProductIds() {
+  return Array.from(document.querySelectorAll('.product-select:checked')).map(cb => cb.value);
+}
+
+function toggleSelectAll(checked) {
+  document.querySelectorAll('.product-select').forEach(cb => { cb.checked = checked; });
+}
+
+function setBulkBusy(busy) {
+  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'syncBtn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  });
+}
+
+function showBulk(message, kind) {
+  document.getElementById('bulkMsg').innerHTML =
+    '<div class="' + (kind || 'success') + '">' + escape(message) + '</div>';
+}
+
+function showItemMessage(id, message, kind) {
+  const msg = document.getElementById('msg-' + id);
+  if (msg) msg.innerHTML = '<div class="' + (kind || 'success') + '">' + escape(message) + '</div>';
+}
+
+async function bulkDraftDescriptions() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  setBulkBusy(true);
+  showBulk('Drafting ' + ids.length + ' description(s)...', 'success');
+  ids.forEach(id => showItemMessage(id, 'Drafting description...', 'success'));
+  try {
+    const resp = await fetch('/audit/bulk/draft-descriptions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ product_ids: ids }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showBulk(data.detail || resp.statusText, 'error');
+      return;
+    }
+    (data.results || []).forEach(r => {
+      if (r.ok) {
+        const textarea = document.getElementById('desc-' + r.product_id);
+        if (textarea) textarea.value = r.description || '';
+        showItemMessage(r.product_id, 'Draft ready. Review it, then approve.', 'success');
+      } else {
+        showItemMessage(r.product_id, r.error || 'Draft failed', 'error');
+      }
+    });
+    showBulk('Drafted ' + data.succeeded + ' of ' + data.requested + ' selected product(s).', data.failed ? 'error' : 'success');
+  } finally {
+    setBulkBusy(false);
+  }
+}
+
+async function bulkApplyDescriptions() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  const updates = ids.map(id => ({
+    product_id: id,
+    approve_description: true,
+    description: (document.getElementById('desc-' + id) || {}).value || '',
+  }));
+  await bulkApply(updates, 'description');
+}
+
+async function bulkApplyPrices() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  const updates = [];
+  for (const id of ids) {
+    const price = parseFloat((document.getElementById('price-' + id) || {}).value);
+    if (isNaN(price)) {
+      showItemMessage(id, 'Enter an approved price.', 'error');
+      continue;
+    }
+    updates.push({ product_id: id, approve_price: true, retail_price: price });
+  }
+  if (!updates.length) { showBulk('No selected products have valid prices.', 'error'); return; }
+  await bulkApply(updates, 'price');
+}
+
+async function bulkApply(updates, label) {
+  setBulkBusy(true);
+  showBulk('Applying ' + updates.length + ' ' + label + ' update(s)...', 'success');
+  updates.forEach(item => showItemMessage(item.product_id, 'Applying update...', 'success'));
+  try {
+    const resp = await fetch('/audit/bulk/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ updates }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showBulk(data.detail || resp.statusText, 'error');
+      return;
+    }
+    (data.results || []).forEach(r => {
+      if (r.ok) {
+        showItemMessage(r.product_id, r.retired ? (r.detail || 'Removed from audit queue.') : 'Updated in Lightspeed.', 'success');
+      } else {
+        showItemMessage(r.product_id, r.error || 'Update failed', 'error');
+      }
+    });
+    showBulk('Applied ' + data.succeeded + ' of ' + data.requested + ' selected update(s).', data.failed ? 'error' : 'success');
+    await load();
+  } finally {
+    setBulkBusy(false);
+  }
 }
 
 async function draftDescription(id) {

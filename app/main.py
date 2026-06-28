@@ -578,6 +578,18 @@ class AuditApplyRequest(BaseModel):
     description: str | None = None
 
 
+class AuditBulkDraftRequest(BaseModel):
+    product_ids: list[str] = Field(default_factory=list)
+
+
+class AuditBulkApplyItem(AuditApplyRequest):
+    product_id: str
+
+
+class AuditBulkApplyRequest(BaseModel):
+    updates: list[AuditBulkApplyItem] = Field(default_factory=list)
+
+
 async def _find_live_audit_product(
     client: LightspeedClient,
     session: AsyncSession,
@@ -613,12 +625,11 @@ async def _find_live_audit_product(
     return None
 
 
-@app.post("/audit/products/{product_id}/apply", dependencies=[Depends(require_auth)])
-async def apply_audit_product_update(
+async def _apply_audit_product_update(
     product_id: str,
     body: AuditApplyRequest,
-    session: AsyncSession = Depends(_session),
-):
+    session: AsyncSession,
+) -> dict:
     product = (await session.execute(
         select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
     )).scalar_one_or_none()
@@ -700,11 +711,19 @@ async def apply_audit_product_update(
     }
 
 
-@app.post("/audit/products/{product_id}/draft-description", dependencies=[Depends(require_auth)])
-async def draft_audit_description(
+@app.post("/audit/products/{product_id}/apply", dependencies=[Depends(require_auth)])
+async def apply_audit_product_update(
     product_id: str,
+    body: AuditApplyRequest,
     session: AsyncSession = Depends(_session),
 ):
+    return await _apply_audit_product_update(product_id, body, session)
+
+
+async def _draft_audit_product_description(
+    product_id: str,
+    session: AsyncSession,
+) -> dict:
     product = (await session.execute(
         select(CatalogProduct).where(CatalogProduct.lightspeed_product_id == product_id)
     )).scalar_one_or_none()
@@ -730,9 +749,91 @@ async def draft_audit_description(
         raise HTTPException(502, f"OpenAI description draft failed: {exc}") from exc
     return {
         "ok": True,
+        "product_id": product_id,
         "description": result.description_html,
         "cleaned_name": result.cleaned_name,
         "warnings": result.warnings,
+    }
+
+
+@app.post("/audit/products/{product_id}/draft-description", dependencies=[Depends(require_auth)])
+async def draft_audit_description(
+    product_id: str,
+    session: AsyncSession = Depends(_session),
+):
+    return await _draft_audit_product_description(product_id, session)
+
+
+@app.post("/audit/bulk/draft-descriptions", dependencies=[Depends(require_auth)])
+async def bulk_draft_audit_descriptions(
+    body: AuditBulkDraftRequest,
+    session: AsyncSession = Depends(_session),
+):
+    product_ids = [pid for pid in dict.fromkeys(body.product_ids) if pid]
+    if not product_ids:
+        raise HTTPException(400, "Select at least one product")
+    if len(product_ids) > 50:
+        raise HTTPException(400, "Max 50 products per bulk draft")
+
+    results = []
+    for product_id in product_ids:
+        try:
+            result = await _draft_audit_product_description(product_id, session)
+            results.append(result)
+        except HTTPException as exc:
+            results.append({
+                "ok": False,
+                "product_id": product_id,
+                "error": exc.detail,
+                "status_code": exc.status_code,
+            })
+    return {
+        "ok": True,
+        "requested": len(product_ids),
+        "succeeded": sum(1 for item in results if item.get("ok")),
+        "failed": sum(1 for item in results if not item.get("ok")),
+        "results": results,
+    }
+
+
+@app.post("/audit/bulk/apply", dependencies=[Depends(require_auth)])
+async def bulk_apply_audit_updates(
+    body: AuditBulkApplyRequest,
+    session: AsyncSession = Depends(_session),
+):
+    if not body.updates:
+        raise HTTPException(400, "Select at least one product")
+    if len(body.updates) > 100:
+        raise HTTPException(400, "Max 100 products per bulk update")
+
+    results = []
+    seen_ids: set[str] = set()
+    for item in body.updates:
+        if not item.product_id or item.product_id in seen_ids:
+            continue
+        seen_ids.add(item.product_id)
+        try:
+            result = await _apply_audit_product_update(item.product_id, item, session)
+            results.append({
+                "ok": True,
+                "product_id": item.product_id,
+                "retired": bool(result.get("retired")),
+                "detail": result.get("detail"),
+            })
+        except HTTPException as exc:
+            results.append({
+                "ok": False,
+                "product_id": item.product_id,
+                "error": exc.detail,
+                "status_code": exc.status_code,
+            })
+    return {
+        "ok": True,
+        "requested": len(seen_ids),
+        "succeeded": sum(1 for item in results if item.get("ok")),
+        "failed": sum(1 for item in results if not item.get("ok")),
+        "retired": sum(1 for item in results if item.get("retired")),
+        "results": results,
     }
 
 
