@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.audit import audit_product, target_price_for_cost
+from app.audit import audit_item_matches_filter, audit_product, target_price_for_cost
 from app.db import CatalogProduct
 
 
@@ -74,3 +74,21 @@ def test_audit_flags_empty_image_placeholders_as_missing_photo():
 
     assert result["has_image"] is False
     assert "missing_photo" in codes
+
+
+def test_audit_item_matches_issue_and_search_filters():
+    missing_photo = audit_product(_product(
+        name="Aquatop Magnet Cleaner",
+        raw={"description": "A detailed aquarium cleaning magnet description." * 4},
+        retail_price=19.99,
+    ))
+    missing_description = audit_product(_product(
+        name="Seachem Tube",
+        raw={"images": [{"url": "https://example.test/image.jpg"}]},
+        retail_price=19.99,
+    ))
+
+    assert audit_item_matches_filter(missing_photo, issue="missing_photo")
+    assert not audit_item_matches_filter(missing_description, issue="missing_photo")
+    assert audit_item_matches_filter(missing_photo, query="aquatop")
+    assert not audit_item_matches_filter(missing_photo, query="seachem")

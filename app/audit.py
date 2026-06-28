@@ -152,6 +152,28 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
     }
 
 
+def audit_item_matches_filter(
+    item: dict[str, Any],
+    *,
+    issue: str | None = None,
+    query: str | None = None,
+) -> bool:
+    codes = {i["code"] for i in item.get("issues", [])}
+    if issue and issue != "all" and issue not in codes:
+        return False
+    q = (query or "").strip().lower()
+    if q:
+        haystack = " ".join(
+            str(v or "") for v in (
+                item.get("name"), item.get("sku"), item.get("barcode"),
+                item.get("supplier_code"), item.get("brand_name"),
+            )
+        ).lower()
+        if q not in haystack:
+            return False
+    return True
+
+
 async def audit_catalog(
     session: AsyncSession,
     *,
@@ -166,7 +188,6 @@ async def audit_catalog(
         .order_by(CatalogProduct.name.asc())
     )).scalars().all()
 
-    q = (query or "").strip().lower()
     audited = []
     summary = {
         "products": 0,
@@ -191,17 +212,8 @@ async def audit_catalog(
         if item["issues"]:
             summary["with_issues"] += 1
 
-        if issue and issue != "all" and issue not in codes:
+        if not audit_item_matches_filter(item, issue=issue, query=query):
             continue
-        if q:
-            haystack = " ".join(
-                str(v or "") for v in (
-                    item["name"], item["sku"], item["barcode"],
-                    item["supplier_code"], item["brand_name"],
-                )
-            ).lower()
-            if q not in haystack:
-                continue
         audited.append(item)
 
     audited.sort(key=lambda item: (-item["issue_count"], item["name"] or ""))

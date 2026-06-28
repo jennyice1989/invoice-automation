@@ -803,8 +803,8 @@ async def bulk_apply_audit_updates(
 ):
     if not body.updates:
         raise HTTPException(400, "Select at least one product")
-    if len(body.updates) > 100:
-        raise HTTPException(400, "Max 100 products per bulk update")
+    if len(body.updates) > 50:
+        raise HTTPException(400, "Max 50 products per bulk update")
 
     results = []
     seen_ids: set[str] = set()

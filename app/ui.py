@@ -348,13 +348,15 @@ AUDIT_HTML = """<!DOCTYPE html>
 </div>
 <script>
 let PRODUCTS = [];
+const BULK_LIMIT = 50;
 
 (async () => { await load(); })();
 
 async function load() {
   const q = document.getElementById('q').value.trim();
   const issue = document.getElementById('issue').value;
-  const params = new URLSearchParams({ limit: '100', issue });
+  const params = new URLSearchParams({ limit: '100' });
+  if (issue && issue !== 'all') params.set('issue', issue);
   if (q) params.set('q', q);
   const resp = await fetch('/audit/products?' + params.toString());
   const data = await resp.json();
@@ -365,7 +367,7 @@ async function load() {
   }
   PRODUCTS = data.data || [];
   document.getElementById('selectAll').checked = false;
-  renderSummary(data.summary || {});
+  renderSummary(data.summary || {}, data.total || 0, issue);
   renderProducts();
 }
 
@@ -384,9 +386,10 @@ async function syncCatalog() {
   }
 }
 
-function renderSummary(s) {
+function renderSummary(s, shown, issue) {
   const items = [
     ['Products', s.products || 0],
+    ['Showing', shown || 0],
     ['With issues', s.with_issues || 0],
     ['Missing photos', s.missing_photo || 0],
     ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
@@ -395,7 +398,9 @@ function renderSummary(s) {
   ];
   document.getElementById('summary').innerHTML = items.map(([label, value]) =>
     '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
-  ).join('');
+  ).join('') + (issue && issue !== 'all'
+    ? '<div class="audit-meta" style="grid-column:1/-1">Filtered by ' + escape(issue.replaceAll('_', ' ')) + '</div>'
+    : '');
 }
 
 function renderProducts() {
@@ -415,7 +420,7 @@ function renderProduct(p) {
   const target = p.target_price == null ? '—' : '$' + p.target_price.toFixed(2);
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
-    + '<h2><label class="opt"><input type="checkbox" class="product-select" value="' + escape(p.id) + '" /> '
+    + '<h2><label class="opt"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
     + escape(p.name || '(unnamed product)') + '</label></h2>'
     + '<div class="audit-meta">'
     + 'SKU ' + escape(p.sku || '—') + ' · Barcode ' + escape(p.barcode || '—')
@@ -441,11 +446,22 @@ function renderProduct(p) {
 }
 
 function selectedProductIds() {
-  return Array.from(document.querySelectorAll('.product-select:checked')).map(cb => cb.value);
+  return Array.from(document.querySelectorAll('.product-select:checked')).slice(0, BULK_LIMIT).map(cb => cb.value);
 }
 
 function toggleSelectAll(checked) {
-  document.querySelectorAll('.product-select').forEach(cb => { cb.checked = checked; });
+  const boxes = Array.from(document.querySelectorAll('.product-select'));
+  boxes.forEach((cb, idx) => { cb.checked = checked && idx < BULK_LIMIT; });
+  if (checked && boxes.length > BULK_LIMIT) {
+    showBulk('Selected the first ' + BULK_LIMIT + ' visible products. Bulk operations are limited to ' + BULK_LIMIT + ' at a time.', 'success');
+  }
+}
+
+function enforceBulkLimit(changed) {
+  const checked = Array.from(document.querySelectorAll('.product-select:checked'));
+  if (checked.length <= BULK_LIMIT) return;
+  changed.checked = false;
+  showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error');
 }
 
 function setBulkBusy(busy) {
@@ -468,6 +484,7 @@ function showItemMessage(id, message, kind) {
 async function bulkDraftDescriptions() {
   const ids = selectedProductIds();
   if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
   setBulkBusy(true);
   showBulk('Drafting ' + ids.length + ' description(s)...', 'success');
   ids.forEach(id => showItemMessage(id, 'Drafting description...', 'success'));
@@ -500,6 +517,7 @@ async function bulkDraftDescriptions() {
 async function bulkApplyDescriptions() {
   const ids = selectedProductIds();
   if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
   const updates = ids.map(id => ({
     product_id: id,
     approve_description: true,
@@ -511,6 +529,7 @@ async function bulkApplyDescriptions() {
 async function bulkApplyPrices() {
   const ids = selectedProductIds();
   if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
   const updates = [];
   for (const id of ids) {
     const price = parseFloat((document.getElementById('price-' + id) || {}).value);
