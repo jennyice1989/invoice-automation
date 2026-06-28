@@ -328,6 +328,7 @@ AUDIT_HTML = """<!DOCTYPE html>
       <option value="missing_photo">Missing photo</option>
       <option value="below_target_margin">Below target margin</option>
       <option value="missing_price">Missing price</option>
+      <option value="missing_sku">Missing SKU</option>
       <option value="missing_barcode_sku">Missing barcode/SKU</option>
       <option value="missing_brand">Missing brand</option>
       <option value="missing_category">Missing category</option>
@@ -340,6 +341,7 @@ AUDIT_HTML = """<!DOCTYPE html>
     <button class="secondary" id="bulkDraftBtn" onclick="bulkDraftDescriptions()">Draft selected descriptions</button>
     <button class="primary" id="bulkDescBtn" onclick="bulkApplyDescriptions()">Approve selected descriptions</button>
     <button class="primary" id="bulkPriceBtn" onclick="bulkApplyPrices()">Approve selected prices</button>
+    <button class="primary" id="bulkSkuBtn" onclick="bulkApplySkus()">Assign selected SKUs</button>
   </div>
   <div id="bulkMsg"></div>
 
@@ -394,6 +396,7 @@ function renderSummary(s, shown, issue) {
     ['Missing photos', s.missing_photo || 0],
     ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
     ['Below target', s.below_target_margin || 0],
+    ['Missing SKUs', s.missing_sku || 0],
     ['Missing codes', s.missing_barcode_sku || 0],
   ];
   document.getElementById('summary').innerHTML = items.map(([label, value]) =>
@@ -418,6 +421,12 @@ function renderProduct(p) {
   ).join('');
   const price = p.retail_price == null ? '—' : '$' + p.retail_price.toFixed(2);
   const target = p.target_price == null ? '—' : '$' + p.target_price.toFixed(2);
+  const skuControls = p.sku ? '' : (
+    '<div style="margin-top:12px"><h2>Custom SKU</h2>'
+    + '<div class="price-box"><input type="text" id="sku-' + p.id + '" value="'
+    + escape(p.suggested_custom_sku || '') + '" />'
+    + '<button class="primary" onclick="applySku(\\'' + p.id + '\\')">Assign SKU</button></div></div>'
+  );
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
     + '<h2><label class="opt"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
@@ -441,6 +450,7 @@ function renderProduct(p) {
     + '<div style="margin-top:12px"><input type="file" accept="image/jpeg,image/png,image/webp" '
     + 'onchange="uploadImage(\\'' + p.id + '\\', this.files[0])" />'
     + '<div class="audit-meta">Use supplier/manufacturer images or licensed files only.</div></div>'
+    + skuControls
     + '<div id="msg-' + p.id + '" style="margin-top:10px"></div>'
     + '</div></div></div>';
 }
@@ -465,7 +475,7 @@ function enforceBulkLimit(changed) {
 }
 
 function setBulkBusy(busy) {
-  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'syncBtn'].forEach(id => {
+  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkSkuBtn', 'syncBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = busy;
   });
@@ -543,6 +553,28 @@ async function bulkApplyPrices() {
   await bulkApply(updates, 'price');
 }
 
+async function bulkApplySkus() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
+  const updates = [];
+  for (const id of ids) {
+    const skuEl = document.getElementById('sku-' + id);
+    if (!skuEl) {
+      showItemMessage(id, 'Product already has a SKU.', 'error');
+      continue;
+    }
+    const sku = skuEl.value.trim();
+    if (!sku) {
+      showItemMessage(id, 'Enter a custom SKU.', 'error');
+      continue;
+    }
+    updates.push({ product_id: id, approve_sku: true, custom_sku: sku });
+  }
+  if (!updates.length) { showBulk('No selected products need custom SKUs.', 'error'); return; }
+  await bulkApply(updates, 'SKU');
+}
+
 async function bulkApply(updates, label) {
   setBulkBusy(true);
   showBulk('Applying ' + updates.length + ' ' + label + ' update(s)...', 'success');
@@ -594,6 +626,12 @@ async function applyPrice(id) {
   const price = parseFloat(document.getElementById('price-' + id).value);
   if (isNaN(price)) { alert('Enter an approved price.'); return; }
   await applyUpdate(id, { approve_price: true, retail_price: price });
+}
+
+async function applySku(id) {
+  const sku = (document.getElementById('sku-' + id) || {}).value || '';
+  if (!sku.trim()) { alert('Enter a custom SKU.'); return; }
+  await applyUpdate(id, { approve_sku: true, custom_sku: sku.trim() });
 }
 
 async function applyUpdate(id, body) {

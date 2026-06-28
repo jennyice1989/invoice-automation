@@ -26,7 +26,9 @@ from app.auth import (
     APP_PASSWORD, COOKIE_MAX_AGE, COOKIE_NAME, check_password,
     make_token, require_auth, require_auth_html,
 )
-from app.audit import audit_catalog, audit_product, target_price_for_cost
+from app.audit import (
+    audit_catalog, audit_product, custom_sku_for_product, target_price_for_cost,
+)
 from app.catalog import (
     catalog_status,
     find_cached_product_by_id,
@@ -662,6 +664,8 @@ class AuditApplyRequest(BaseModel):
     retail_price: float | None = None
     approve_description: bool = False
     description: str | None = None
+    approve_sku: bool = False
+    custom_sku: str | None = None
 
 
 class AuditBulkDraftRequest(BaseModel):
@@ -765,6 +769,14 @@ async def _apply_audit_product_update(
             raise HTTPException(400, "Approved description is empty")
         update["description"] = description
 
+    if body.approve_sku:
+        custom_sku = (body.custom_sku or "").strip() or custom_sku_for_product(product)
+        if not custom_sku:
+            raise HTTPException(400, "Approved SKU is empty")
+        if product.sku and product.sku.strip():
+            raise HTTPException(400, "Product already has a SKU")
+        update["sku"] = custom_sku
+
     if not update:
         raise HTTPException(400, "Nothing approved to update")
 
@@ -810,6 +822,8 @@ async def _apply_audit_product_update(
             product.supply_price = partial_update["supply_price"]
         if "supplier_code" in partial_update:
             product.supplier_code = partial_update["supplier_code"]
+        if "sku" in partial_update:
+            product.sku = partial_update["sku"]
         product.updated_at = datetime.utcnow()
     else:
         await upsert_cached_product(session, updated)

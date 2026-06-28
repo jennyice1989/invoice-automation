@@ -790,6 +790,7 @@ class LightspeedClient:
         *,
         retail_price: float | None = None,
         supply_price: float | None = None,
+        sku: str | None = None,
         supplier_code: str | None = None,
         description: str | None = None,
     ) -> dict | None:
@@ -804,6 +805,8 @@ class LightspeedClient:
             payload["price_excluding_tax"] = retail_price
         if supply_price is not None:
             payload["supply_price"] = supply_price
+        if sku is not None:
+            payload["sku"] = sku
         if supplier_code is not None:
             payload["supplier_code"] = supplier_code
         if description is not None:

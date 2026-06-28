@@ -15,6 +15,7 @@ from app.pricing import _round
 
 TARGET_MARGIN_MULTIPLIER = 1.5
 TARGET_ROUNDING = "cents_49_99"
+CUSTOM_SKU_PREFIX = "CUSTOM"
 
 
 @dataclass
@@ -85,6 +86,12 @@ def target_price_for_cost(cost: float | None) -> float | None:
     return _round(cost * TARGET_MARGIN_MULTIPLIER, TARGET_ROUNDING)
 
 
+def custom_sku_for_product(product: CatalogProduct) -> str:
+    source = product.lightspeed_product_id or product.name or "PRODUCT"
+    token = re.sub(r"[^A-Za-z0-9]", "", source).upper()[:10]
+    return f"{CUSTOM_SKU_PREFIX}-{token or 'PRODUCT'}"
+
+
 def audit_product(product: CatalogProduct) -> dict[str, Any]:
     raw = product.raw or {}
     description = _raw_description(raw)
@@ -121,6 +128,10 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         issues.append(AuditIssue(
             "missing_barcode_sku", "Missing barcode/SKU", "medium",
         ))
+    if not product.sku:
+        issues.append(AuditIssue(
+            "missing_sku", "Missing SKU", "medium",
+        ))
     if not product.brand_name:
         issues.append(AuditIssue(
             "missing_brand", "Missing brand", "low",
@@ -137,6 +148,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         "id": product.lightspeed_product_id,
         "name": product.name,
         "sku": product.sku,
+        "suggested_custom_sku": custom_sku_for_product(product) if not product.sku else None,
         "barcode": product.barcode,
         "supplier_code": product.supplier_code,
         "brand_name": product.brand_name,
@@ -198,6 +210,7 @@ async def audit_catalog(
         "below_target_margin": 0,
         "missing_price": 0,
         "missing_barcode_sku": 0,
+        "missing_sku": 0,
         "missing_brand": 0,
         "missing_category": 0,
     }

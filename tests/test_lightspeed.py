@@ -424,6 +424,24 @@ async def test_update_product_fetches_product_when_response_is_empty(client_fact
 
 
 @pytest.mark.asyncio
+async def test_update_product_sends_sku(client_factory):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"data": {"id": "prod-1", "sku": "CUSTOM-PROD1"}})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.update_product("prod-1", sku="CUSTOM-PROD1")
+
+    assert captured["body"]["sku"] == "CUSTOM-PROD1"
+    assert product["sku"] == "CUSTOM-PROD1"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_update_product_returns_partial_success_when_empty_response_refetch_fails(client_factory):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):

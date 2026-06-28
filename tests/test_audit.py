@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.audit import audit_item_matches_filter, audit_product, target_price_for_cost
+from app.audit import (
+    audit_item_matches_filter,
+    audit_product,
+    custom_sku_for_product,
+    target_price_for_cost,
+)
 from app.db import CatalogProduct
 
 
@@ -74,6 +79,16 @@ def test_audit_flags_empty_image_placeholders_as_missing_photo():
 
     assert result["has_image"] is False
     assert "missing_photo" in codes
+
+
+def test_audit_flags_missing_sku_and_suggests_custom_sku():
+    product = _product(lightspeed_product_id="6d3e8ae2-bbb8", sku=None)
+    result = audit_product(product)
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert "missing_sku" in codes
+    assert result["suggested_custom_sku"] == "CUSTOM-6D3E8AE2BB"
+    assert custom_sku_for_product(product) == "CUSTOM-6D3E8AE2BB"
 
 
 def test_audit_item_matches_issue_and_search_filters():
