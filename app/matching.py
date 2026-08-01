@@ -517,6 +517,7 @@ class MatchingService:
                         product_id=p["id"],
                         product_sku=p.get("sku"),
                         product_name=p.get("name"),
+                        current_retail_price=p.get("price_excluding_tax"),
                         matched_by="catalog_identifier_digits",
                         confidence=1.0,
                     )
@@ -539,6 +540,7 @@ class MatchingService:
                     product_id=product["id"],
                     product_sku=product.get("sku"),
                     product_name=product.get("name"),
+                    current_retail_price=product.get("price_excluding_tax"),
                     matched_by="supplier_code_live",
                     confidence=1.0,
                 )
