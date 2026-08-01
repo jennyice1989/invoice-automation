@@ -918,7 +918,7 @@ function render() {
          + '<label style="font-size:12px;color:var(--muted)">Amount'
          + '<input id="extraAmount" type="number" step="0.01" placeholder="0.00" style="display:block;margin-top:4px;width:110px" /></label>'
          + '<button class="cand-btn" type="button" onclick="addOrderCost()">Add cost</button>'
-         + '<span id="orderCostsView"></span></div>
+         + '<span id="orderCostsView"></span></div>'
          + '<span class="grow"></span>'
          + '<button class="primary" id="finalBtn" onclick="finalize()">'
          + 'Push to Lightspeed</button></div>'
