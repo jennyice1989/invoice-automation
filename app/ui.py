@@ -1289,6 +1289,7 @@ function sourceLabel(s) {
   if (s === 'scrape:chewy') return 'Chewy';
   if (s === 'scrape:petco') return 'Petco';
   if (s === 'scrape:petsmart') return 'PetSmart';
+  if (s === 'scrape:retailer-comparison') return 'Retailer comparison';
   if (s === 'rule') return 'Rule';
   return s;
 }

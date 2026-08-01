@@ -84,12 +84,15 @@ Each line's retail price is recommended from:
 2. **MSRP** — if you've uploaded an MSRP CSV for that supplier and the
    line matches by supplier_code or barcode
 3. **Retailer comparison** — best-effort first-party prices from Chewy,
-   Petco, and PetSmart. Marketplace sellers are intentionally excluded.
+   Petco, and PetSmart. The app uses the median first-party retailer price
+   as a market-aligned candidate. Marketplace sellers are intentionally
+   excluded.
 
-The app will not recommend lowering an existing retail price. If the computed
-recommendation is below current retail, the recommendation is held at the
-current price. Matched-product retail changes are pushed to Lightspeed only
-after per-line approval in the review screen.
+The app recommends the highest safe candidate from target margin, MSRP,
+retailer comparison, and current retail. It will not recommend lowering an
+existing retail price. If the computed recommendation is below current retail,
+the recommendation is held at the current price. Matched-product retail changes
+are pushed to Lightspeed only after per-line approval in the review screen.
 
 ### Web scraping limitations
 

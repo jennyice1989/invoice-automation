@@ -25,6 +25,8 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: "gpt-5.5"
+      - key: ENABLE_SCRAPING
+        value: "1"
       - key: APP_PASSWORD
         sync: false
       - key: DATABASE_URL

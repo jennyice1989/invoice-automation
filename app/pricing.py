@@ -1,11 +1,12 @@
 """
 Pricing engine.
 
-Strategy: try sources in order, first non-null wins.
-  1. MSRP from supplier price list (if uploaded)
-  2. Web scrape Chewy/Petco/PetSmart non-sale price (DISABLED by default —
-     these sites block cloud IPs aggressively. Set ENABLE_SCRAPING=1 to try.)
-  3. Rules engine: cost * markup, rounded
+Strategy: gather pricing signals and recommend the highest safe value.
+  1. Rules engine: cost * markup, rounded
+  2. MSRP from supplier price list (if uploaded)
+  3. First-party retailer comparison from Chewy/Petco/PetSmart (DISABLED by
+     default because these sites block cloud IPs aggressively. Set
+     ENABLE_SCRAPING=1 to try.)
 
 Returns the price and a source tag so the UI can show how it was derived
 and let the user override.
@@ -35,7 +36,7 @@ ENABLE_SCRAPING = os.environ.get("ENABLE_SCRAPING", "").lower() in ("1", "true",
 @dataclass
 class PricingResult:
     price: float | None
-    source: str  # 'msrp' | 'scrape:chewy' | 'scrape:petco' | 'scrape:petsmart' | 'rule' | 'none'
+    source: str  # 'msrp' | 'scrape:*' | 'rule' | 'none'
     rule_name: str | None = None
     notes: str | None = None
     scraped_data: dict | None = None
@@ -196,6 +197,17 @@ async def _try_scrape(query: str) -> tuple[str | None, float | None, dict]:
     return None, None, data
 
 
+def _competitor_alignment_price(prices: list[float]) -> float | None:
+    """Use the median first-party retail price as the market alignment point."""
+    valid = sorted(float(p) for p in prices if isinstance(p, (int, float)) and p > 0)
+    if not valid:
+        return None
+    mid = len(valid) // 2
+    if len(valid) % 2:
+        return round(valid[mid], 2)
+    return round((valid[mid - 1] + valid[mid]) / 2, 2)
+
+
 # --------------------------------------------------------------------- #
 # Public                                                                #
 # --------------------------------------------------------------------- #
@@ -238,20 +250,33 @@ async def price_line(
     # price.
     scraped_data: dict | None = None
     competitor_prices: list[float] = []
-    if try_scrape and ENABLE_SCRAPING and description:
-        source, price, data = await _try_scrape(description)
-        scraped_data = data
-        if source and price:
-            competitor_prices = [
-                float(v) for v in data.values() if isinstance(v, (int, float)) and v > 0
-            ]
-            low = min(competitor_prices)
-            high = max(competitor_prices)
-            notes.append(
-                f"Retailer comparison ${low:.2f}-${high:.2f}; marketplace sellers excluded"
-            )
+    competitor_price: float | None = None
+    if try_scrape and ENABLE_SCRAPING:
+        scrape_queries = []
+        for query in (barcode, description):
+            query = (query or "").strip()
+            if query and query not in scrape_queries:
+                scrape_queries.append(query)
 
-    candidates = [p for p in (target_price, msrp_value) if p is not None and p > 0]
+        for query in scrape_queries:
+            source, price, data = await _try_scrape(query)
+            scraped_data = {"query": query, "prices": data}
+            if source and price:
+                competitor_prices = [
+                    float(v) for v in data.values() if isinstance(v, (int, float)) and v > 0
+                ]
+                competitor_price = _competitor_alignment_price(competitor_prices)
+                low = min(competitor_prices)
+                high = max(competitor_prices)
+                notes.append(
+                    f"Retailer comparison ${low:.2f}-${high:.2f}; "
+                    f"market-aligned ${competitor_price:.2f}; marketplace sellers excluded"
+                )
+                break
+
+    candidates = [
+        p for p in (target_price, msrp_value, competitor_price) if p is not None and p > 0
+    ]
     recommended = max(candidates) if candidates else None
 
     if current_retail_price is not None and recommended is not None:
@@ -262,7 +287,12 @@ async def price_line(
             recommended = current_retail_price
 
     if recommended is not None:
-        source = "msrp" if msrp_value is not None and recommended == msrp_value else rule_result.source
+        if competitor_price is not None and recommended == competitor_price:
+            source = "scrape:retailer-comparison"
+        elif msrp_value is not None and recommended == msrp_value:
+            source = "msrp"
+        else:
+            source = rule_result.source
         return PricingResult(
             price=recommended,
             source=source or "rule",
