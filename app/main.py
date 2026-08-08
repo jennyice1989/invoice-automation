@@ -1518,6 +1518,13 @@ class FinalizeRequest(BaseModel):
     matched_overrides: dict[int, float] = Field(default_factory=dict)
 
 
+def _should_receive_initial_consignment(
+    *, receive_immediately: bool, queued_for_enrichment_count: int
+) -> bool:
+    """Receive importable items now; queued drafts use follow-up consignments."""
+    return receive_immediately
+
+
 @app.post("/invoices/finalize", dependencies=[Depends(require_auth)])
 async def finalize_invoice(
     body: FinalizeRequest,
@@ -1890,7 +1897,14 @@ async def finalize_invoice(
     items_failed = 0
     consignment_errors: list[str] = []
 
-    receive_now = body.receive_immediately and not queued_for_enrichment
+    # If the user asked to receive now, receive the consignment for the items
+    # we can import now. Deferred enrichment items will be added later via a
+    # follow-up received consignment, since Lightspeed locks received
+    # consignments against new lines.
+    receive_now = _should_receive_initial_consignment(
+        receive_immediately=body.receive_immediately,
+        queued_for_enrichment_count=len(queued_for_enrichment),
+    )
     if items_for_lightspeed:
         try:
             result = await client.import_invoice(

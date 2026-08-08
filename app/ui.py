@@ -1190,9 +1190,12 @@ async function finalize() {
         h += '</tbody></table></details>';
       }
       if (data.queued_for_enrichment_count > 0) {
+        const enrichmentMsg = data.status === 'RECEIVED'
+          ? 'Approved drafts will be received on follow-up consignments. '
+          : 'These will be added to the consignment once you approve each draft. ';
         h += '<br><strong>' + data.queued_for_enrichment_count
           + ' new product(s) queued for enrichment.</strong> '
-          + 'These will be added to the consignment once you approve each draft. '
+          + enrichmentMsg
           + '<a href="' + data.enrichment_redirect + '" class="primary" '
           + 'style="display:inline-block;margin-top:8px;text-decoration:none;'
           + 'color:white;padding:6px 12px;border-radius:4px">'

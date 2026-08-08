@@ -59,7 +59,8 @@ Visit your Render URL, enter `APP_PASSWORD`. Cookie is valid for 30 days.
 products, and creates the consignment. Retail price recommendations are
 uploaded only for lines you approve on the review screen. Optionally mark
 RECEIVED to update inventory immediately. (Once RECEIVED, received
-quantities are locked.)
+quantities are locked; queued enrichment products are received later on
+follow-up consignments.)
 
 **Add product photos.** On the enrichment review screen, create the product
 first, then upload an approved supplier/manufacturer image or another licensed
