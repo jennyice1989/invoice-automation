@@ -4,9 +4,8 @@ Pricing engine.
 Strategy: gather pricing signals and recommend the highest safe value.
   1. Rules engine: cost * markup, rounded
   2. MSRP from supplier price list (if uploaded)
-  3. First-party retailer comparison from Chewy/Petco/PetSmart (DISABLED by
-     default because these sites block cloud IPs aggressively. Set
-     ENABLE_SCRAPING=1 to try.)
+  3. Market retail comparison from SerpApi Google Shopping when configured,
+     falling back to direct Chewy/Petco/PetSmart checks when enabled.
 
 Returns the price and a source tag so the UI can show how it was derived
 and let the user override.
@@ -27,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import PricingRule, find_msrp
+from app.retail_pricing import RetailOffer, configured_provider, fetch_market_prices
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +197,40 @@ async def _try_scrape(query: str) -> tuple[str | None, float | None, dict]:
     return None, None, data
 
 
+def _offer_price_map(offers: list[RetailOffer]) -> dict:
+    prices: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for offer in offers:
+        key = offer.seller.strip().lower().replace(" ", "_")
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] > 1:
+            key = f"{key}_{counts[key]}"
+        prices[key] = offer.price
+    return prices
+
+
+async def _try_market_prices(query: str) -> tuple[str | None, float | None, dict]:
+    result = await fetch_market_prices(query)
+    data = {
+        "provider": result.provider,
+        "raw_count": result.raw_count,
+        "offers": [
+            {
+                "seller": offer.seller,
+                "title": offer.title,
+                "price": offer.price,
+                "url": offer.url,
+                "position": offer.position,
+            }
+            for offer in result.offers
+        ],
+        "prices": _offer_price_map(result.offers),
+    }
+    if result.offers:
+        return "market:serpapi", result.offers[0].price, data
+    return None, None, data
+
+
 def _competitor_alignment_price(prices: list[float]) -> float | None:
     """Use the median first-party retail price as the market alignment point."""
     valid = sorted(float(p) for p in prices if isinstance(p, (int, float)) and p > 0)
@@ -251,7 +285,7 @@ async def price_line(
     scraped_data: dict | None = None
     competitor_prices: list[float] = []
     competitor_price: float | None = None
-    if try_scrape and ENABLE_SCRAPING:
+    if try_scrape and (ENABLE_SCRAPING or configured_provider()):
         scrape_queries = []
         for query in (barcode, description):
             query = (query or "").strip()
@@ -259,11 +293,17 @@ async def price_line(
                 scrape_queries.append(query)
 
         for query in scrape_queries:
-            source, price, data = await _try_scrape(query)
-            scraped_data = {"query": query, "prices": data}
+            if configured_provider():
+                source, price, data = await _try_market_prices(query)
+                scraped_data = {"query": query, **data}
+            else:
+                source, price, data = await _try_scrape(query)
+                scraped_data = {"query": query, "prices": data}
             if source and price:
                 competitor_prices = [
-                    float(v) for v in data.values() if isinstance(v, (int, float)) and v > 0
+                    float(v)
+                    for v in (data.get("prices", data).values() if isinstance(data, dict) else [])
+                    if isinstance(v, (int, float)) and v > 0
                 ]
                 competitor_price = _competitor_alignment_price(competitor_prices)
                 low = min(competitor_prices)

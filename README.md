@@ -83,10 +83,12 @@ Each line's retail price is recommended from:
    to the next `.49` or `.99`
 2. **MSRP** — if you've uploaded an MSRP CSV for that supplier and the
    line matches by supplier_code or barcode
-3. **Retailer comparison** — best-effort first-party prices from Chewy,
-   Petco, and PetSmart. The app uses the median first-party retailer price
-   as a market-aligned candidate. Marketplace sellers are intentionally
-   excluded.
+3. **Retailer comparison** — SerpApi Google Shopping when
+   `PRICING_PROVIDER=serpapi` and `SERPAPI_API_KEY` are configured. The app
+   searches barcode/UPC first, then product description, filters sale,
+   second-hand, and marketplace results, and uses the median accepted retailer
+   price as a market-aligned candidate. Direct Chewy/Petco/PetSmart checks
+   remain as a fallback when `ENABLE_SCRAPING=1`.
 
 The app recommends the highest safe candidate from target margin, MSRP,
 retailer comparison, and current retail. It will not recommend lowering an
@@ -94,18 +96,19 @@ existing retail price. If the computed recommendation is below current retail,
 the recommendation is held at the current price. Matched-product retail changes
 are pushed to Lightspeed only after per-line approval in the review screen.
 
-### Web scraping limitations
+### Pricing provider setup
 
-Chewy, Petco, and PetSmart use Cloudflare and often block requests from
-cloud-provider IPs. The scraper is implemented as best-effort: when blocked,
-it returns null and pricing falls back to the rules engine. For reliable
-retail-price data, swap the scraper functions in `app/pricing.py` to use:
+For reliable market-aware pricing, set these environment variables:
 
-- A residential-proxy service (Bright Data, Oxylabs)
-- A retail-price API (SerpAPI's Google Shopping endpoint)
-- A companion process running on a residential IP at your store
+```env
+PRICING_PROVIDER=serpapi
+SERPAPI_API_KEY=your_serpapi_key
+```
 
-All three are drop-in changes to the `_scrape_*` functions.
+SerpApi returns structured Google Shopping results, which are more reliable
+than direct retailer scraping from a cloud host. If SerpApi is not configured,
+the app can still try the direct Chewy/Petco/PetSmart fallback when
+`ENABLE_SCRAPING=1`, but those retailers often block cloud-provider IPs.
 
 ### MSRP upload format
 

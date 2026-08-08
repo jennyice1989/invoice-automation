@@ -182,3 +182,82 @@ async def test_price_line_searches_barcode_before_description(monkeypatch):
         "query": "Seachem Prime 500ml",
         "prices": {"chewy": None, "petco": 22.99, "petsmart": None},
     }
+
+
+@pytest.mark.asyncio
+async def test_price_line_uses_market_provider_when_configured(monkeypatch):
+    async def fake_apply_rules(session, cost, description):
+        return PricingResult(
+            price=16.99,
+            source="rule",
+            rule_name="Default target margin",
+            notes="1.5x cost, rounded (cents_49_99)",
+            target_price=16.99,
+        )
+
+    async def fake_find_msrp(*args, **kwargs):
+        return None
+
+    async def fake_try_market_prices(query):
+        return "market:serpapi", 24.99, {
+            "provider": "serpapi",
+            "raw_count": 3,
+            "offers": [
+                {
+                    "seller": "Chewy",
+                    "title": "Seachem Prime",
+                    "price": 24.99,
+                    "url": "https://example.test/chewy",
+                    "position": 1,
+                },
+                {
+                    "seller": "Petco",
+                    "title": "Seachem Prime",
+                    "price": 22.99,
+                    "url": "https://example.test/petco",
+                    "position": 2,
+                },
+            ],
+            "prices": {"chewy": 24.99, "petco": 22.99},
+        }
+
+    monkeypatch.setattr(pricing, "_apply_rules", fake_apply_rules)
+    monkeypatch.setattr(pricing, "find_msrp", fake_find_msrp)
+    monkeypatch.setattr(pricing, "configured_provider", lambda: "serpapi")
+    monkeypatch.setattr(pricing, "_try_market_prices", fake_try_market_prices)
+
+    result = await pricing.price_line(
+        None,
+        supplier_id="sup-1",
+        supplier_code="abc",
+        barcode="000116070782",
+        description="Seachem Prime 500ml",
+        cost=10.00,
+        current_retail_price=None,
+        try_scrape=True,
+    )
+
+    assert result.price == 23.99
+    assert result.source == "scrape:retailer-comparison"
+    assert result.scraped_data == {
+        "query": "000116070782",
+        "provider": "serpapi",
+        "raw_count": 3,
+        "offers": [
+            {
+                "seller": "Chewy",
+                "title": "Seachem Prime",
+                "price": 24.99,
+                "url": "https://example.test/chewy",
+                "position": 1,
+            },
+            {
+                "seller": "Petco",
+                "title": "Seachem Prime",
+                "price": 22.99,
+                "url": "https://example.test/petco",
+                "position": 2,
+            },
+        ],
+        "prices": {"chewy": 24.99, "petco": 22.99},
+    }

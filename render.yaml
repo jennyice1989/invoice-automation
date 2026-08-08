@@ -25,6 +25,10 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: "gpt-5.5"
+      - key: PRICING_PROVIDER
+        value: "serpapi"
+      - key: SERPAPI_API_KEY
+        sync: false
       - key: ENABLE_SCRAPING
         value: "1"
       - key: APP_PASSWORD
