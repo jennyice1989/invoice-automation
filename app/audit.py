@@ -98,6 +98,16 @@ def sku_looks_like_barcode(sku: str | None) -> bool:
     return value.isdigit() and len(value) in BARCODE_SKU_LENGTHS
 
 
+def effective_barcode_for_product(product: CatalogProduct) -> str | None:
+    barcode = (product.barcode or "").strip()
+    if barcode:
+        return barcode
+    sku = (product.sku or "").strip()
+    if sku_looks_like_barcode(sku):
+        return sku
+    return None
+
+
 def is_generated_sku(sku: str | None, barcode: str | None = None) -> bool:
     value = (sku or "").strip()
     if not value:
@@ -116,6 +126,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
     description_text = _plain_text(description)
     current_price = product.retail_price
     target_price = target_price_for_cost(product.supply_price)
+    effective_barcode = effective_barcode_for_product(product)
     issues: list[AuditIssue] = []
 
     if not description_text:
@@ -147,11 +158,11 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
             "inventory_tracking_off", "Inventory tracking off", "high",
         ))
 
-    if not product.barcode and not product.sku:
+    if not effective_barcode and not product.sku:
         issues.append(AuditIssue(
             "missing_barcode_sku", "Missing barcode/SKU", "medium",
         ))
-    if not product.barcode:
+    if not effective_barcode:
         issues.append(AuditIssue(
             "missing_barcode", "Missing barcode", "medium",
         ))
@@ -159,7 +170,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         issues.append(AuditIssue(
             "missing_sku", "Missing SKU", "medium",
         ))
-    elif is_generated_sku(product.sku, product.barcode):
+    elif is_generated_sku(product.sku, effective_barcode):
         issues.append(AuditIssue(
             "generated_sku", "Generated/internal SKU", "medium",
         ))
@@ -179,9 +190,9 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         "id": product.lightspeed_product_id,
         "name": product.name,
         "sku": product.sku,
-        "is_generated_sku": is_generated_sku(product.sku, product.barcode),
+        "is_generated_sku": is_generated_sku(product.sku, effective_barcode),
         "suggested_custom_sku": custom_sku_for_product(product) if not product.sku else None,
-        "barcode": product.barcode,
+        "barcode": effective_barcode,
         "supplier_code": product.supplier_code,
         "brand_name": product.brand_name,
         "category_name": product.category_name,

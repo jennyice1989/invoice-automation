@@ -5,6 +5,7 @@ from datetime import datetime
 from app.catalog import (
     deactivate_missing_catalog_products,
     product_to_cache_fields,
+    product_barcode_value,
     search_score,
 )
 
@@ -30,6 +31,12 @@ def test_product_to_cache_fields_normalizes_common_values():
     assert fields["brand_name"] == "Seachem"
     assert fields["has_inventory"] is True
     assert fields["active"] is True
+
+
+def test_product_to_cache_fields_reads_alternate_barcode_shapes():
+    assert product_barcode_value({"barcodes": [{"barcode": "810146751229"}]}) == "810146751229"
+    assert product_barcode_value({"product_codes": [{"type": "UPC", "code": "842982025202"}]}) == "842982025202"
+    assert product_barcode_value({"upc": "000116768702"}) == "000116768702"
 
 
 def test_search_score_prefers_specific_match():

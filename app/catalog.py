@@ -36,8 +36,33 @@ def _norm_code(s: str | None) -> str:
 
 def _barcode_value(value) -> str | None:
     if isinstance(value, list):
-        return str(value[0]).strip() if value else None
+        for item in value:
+            barcode = _barcode_value(item)
+            if barcode:
+                return barcode
+        return None
+    if isinstance(value, dict):
+        for key in (
+            "barcode", "code", "value", "upc", "ean", "gtin", "number",
+            "product_code",
+        ):
+            barcode = _barcode_value(value.get(key))
+            if barcode:
+                return barcode
+        return None
     return str(value).strip() if value else None
+
+
+def product_barcode_value(product: dict) -> str | None:
+    """Return the first barcode/UPC value across common Lightspeed shapes."""
+    for key in (
+        "barcode", "barcodes", "upc", "ean", "gtin", "product_code",
+        "product_codes", "codes",
+    ):
+        barcode = _barcode_value(product.get(key))
+        if barcode:
+            return barcode
+    return None
 
 
 def product_to_cache_fields(product: dict, synced_at: datetime) -> dict:
@@ -50,7 +75,7 @@ def product_to_cache_fields(product: dict, synced_at: datetime) -> dict:
         "name": product.get("name"),
         "normalized_name": normalize_text(product.get("name")),
         "sku": product.get("sku"),
-        "barcode": _barcode_value(product.get("barcode")),
+        "barcode": product_barcode_value(product),
         "supplier_code": product.get("supplier_code"),
         "supplier_id": product.get("supplier_id"),
         "brand_name": brand_name,

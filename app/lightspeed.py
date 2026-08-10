@@ -45,6 +45,59 @@ def _norm_search(s: str | None) -> str:
     return " ".join(str(s).lower().replace("-", " ").split())
 
 
+def _barcode_value(value: Any) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            barcode = _barcode_value(item)
+            if barcode:
+                return barcode
+        return None
+    if isinstance(value, dict):
+        for key in (
+            "barcode", "code", "value", "upc", "ean", "gtin", "number",
+            "product_code",
+        ):
+            barcode = _barcode_value(value.get(key))
+            if barcode:
+                return barcode
+        return None
+    return str(value).strip() if value else None
+
+
+def _barcode_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_barcode_values(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for key in (
+            "barcode", "code", "value", "upc", "ean", "gtin", "number",
+            "product_code",
+        ):
+            out.extend(_barcode_values(value.get(key)))
+        return out
+    barcode = str(value).strip() if value else None
+    return [barcode] if barcode else []
+
+
+def _product_barcode_values(product: dict) -> list[str]:
+    out: list[str] = []
+    for key in (
+        "barcode", "barcodes", "upc", "ean", "gtin", "product_code",
+        "product_codes", "codes",
+    ):
+        out.extend(_barcode_values(product.get(key)))
+    return out
+
+
+def _product_barcode_value(product: dict) -> str | None:
+    values = _product_barcode_values(product)
+    return values[0] if values else None
+
+
+
 def _norm_supplier_name(s: str | None) -> str:
     """Normalize supplier names for Lightspeed/invoice comparison."""
     if not s:
@@ -95,7 +148,7 @@ def _product_search_score(query: str, product: dict) -> float:
         _norm_search(product.get("name")),
         _norm_search(product.get("sku")),
         _norm_search(product.get("supplier_code")),
-        _norm_search(product.get("barcode")),
+        _norm_search(_product_barcode_value(product)),
     ]
     best = 0.0
     q_tokens = set(q.split())
@@ -557,13 +610,7 @@ class LightspeedClient:
         )
         needle = barcode.strip()
         for item in data.get("data", []):
-            pb = item.get("barcode")
-            matched = False
-            if isinstance(pb, list):
-                matched = needle in pb
-            else:
-                matched = (pb or "").strip() == needle
-            if not matched:
+            if needle not in _product_barcode_values(item):
                 continue
             if not _is_live_product(item):
                 continue

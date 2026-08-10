@@ -113,6 +113,17 @@ def test_audit_flags_missing_barcode_when_sku_exists():
     assert audit_item_matches_filter(result, issue="missing_barcode")
 
 
+def test_audit_treats_upc_sku_as_barcode():
+    result = audit_product(_product(sku="000116768702", barcode=None))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert result["barcode"] == "000116768702"
+    assert result["is_generated_sku"] is False
+    assert "missing_barcode" not in codes
+    assert "missing_barcode_sku" not in codes
+    assert "generated_sku" not in codes
+
+
 def test_audit_flags_short_numeric_sku_as_generated():
     result = audit_product(_product(sku="10558", barcode=None))
     codes = {issue["code"] for issue in result["issues"]}
