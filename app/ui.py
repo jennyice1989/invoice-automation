@@ -2,10 +2,8 @@
 
 _COMMON_CSS = """
 :root {
-  --bg: #f6f7f4; --surface: #ffffff; --surface-soft: #fbfbf9;
-  --fg: #1f2933; --muted: #69727d; --muted-soft: #8b949e;
-  --border: #dde3e2; --border-strong: #c7d2d0;
-  --accent: #0f5e5e; --accent-hover: #0b4f50; --accent-soft: #e8f5f3;
+  --bg: #fafaf9; --fg: #1c1917; --muted: #78716c;
+  --border: #e7e5e4; --accent: #0c4a6e; --accent-soft: #f0f9ff;
   --good: #166534; --warn: #92400e; --bad: #991b1b;
   --good-bg: #f0fdf4; --warn-bg: #fffbeb; --bad-bg: #fef2f2;
   --bucket-match: #dbeafe; --bucket-match-fg: #1e40af;
@@ -13,28 +11,24 @@ _COMMON_CSS = """
   --bucket-uncertain: #fee2e2; --bucket-uncertain-fg: #991b1b;
 }
 * { box-sizing: border-box; }
-body { font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-       color: var(--fg); background:
-       radial-gradient(circle at top left, rgba(15,94,94,0.08), transparent 34rem),
-       var(--bg); margin: 0; padding: 24px 16px 40px; }
-.container { max-width: 1180px; margin: 0 auto; }
-nav { display: flex; align-items: center; gap: 6px; margin-bottom: 26px; font-size: 14px;
-      padding: 8px; border: 1px solid var(--border); border-radius: 8px;
-      background: rgba(255,255,255,0.86); box-shadow: 0 10px 30px rgba(31,41,51,0.05); }
-nav a { color: var(--muted); text-decoration: none; padding: 8px 10px;
-        border-radius: 6px; font-weight: 600; }
-nav a:hover, nav a.active { color: var(--fg); background: var(--accent-soft); }
+body { font: 15px/1.5 system-ui, -apple-system, sans-serif;
+       color: var(--fg); background: var(--bg); margin: 0;
+       padding: 24px 16px; }
+.container { max-width: 1100px; margin: 0 auto; }
+nav { display: flex; gap: 16px; margin-bottom: 24px; font-size: 14px;
+      padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover, nav a.active { color: var(--fg); }
 nav .grow { flex: 1; }
 nav form { display: inline; }
 nav button.logout { background: none; border: none; color: var(--muted);
-                    cursor: pointer; font-size: 14px; padding: 8px 10px; border-radius: 6px; }
+                    cursor: pointer; font-size: 14px; padding: 0; }
 nav button.logout:hover { color: var(--fg); }
-h1 { font-size: 26px; line-height: 1.15; margin: 0 0 6px; }
-h2 { font-size: 15px; margin: 0 0 12px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 12px; }
 .subtitle { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
-.card { background: var(--surface); border: 1px solid var(--border);
-        border-radius: 8px; padding: 20px; margin-bottom: 16px;
-        box-shadow: 0 10px 30px rgba(31,41,51,0.04); }
+.card { background: white; border: 1px solid var(--border);
+        border-radius: 8px; padding: 20px; margin-bottom: 16px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 12px;
          border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -55,25 +49,19 @@ th { font-weight: 600; color: var(--muted); font-size: 12px;
 .warnings ul { margin: 4px 0 0; padding-left: 20px; }
 button.primary {
   background: var(--accent); color: white; border: none;
-  padding: 10px 16px; border-radius: 6px; font-size: 14px;
-  font-weight: 700; cursor: pointer; box-shadow: 0 1px 2px rgba(31,41,51,0.12);
-  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  padding: 10px 20px; border-radius: 6px; font-size: 14px;
+  font-weight: 500; cursor: pointer;
 }
-button.primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
+button.primary:hover { background: #075985; }
 button.primary:disabled { background: var(--muted); cursor: not-allowed; }
 button.secondary {
-  background: var(--surface); color: var(--fg); border: 1px solid var(--border);
-  padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
-  font-weight: 700; transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  background: white; color: var(--fg); border: 1px solid var(--border);
+  padding: 6px 12px; border-radius: 4px; font-size: 13px; cursor: pointer;
 }
-button.secondary:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-button.secondary:disabled { color: var(--muted-soft); cursor: not-allowed; background: #f3f4f6; }
-input[type=text], input[type=password], input[type=number], select, textarea {
+button.secondary:hover { border-color: var(--accent); color: var(--accent); }
+input[type=text], input[type=password], input[type=number] {
   font: inherit; padding: 8px 10px; border: 1px solid var(--border);
-  border-radius: 6px; width: 100%; background: white; color: var(--fg);
-}
-input:focus, select:focus, textarea:focus {
-  outline: 3px solid rgba(15,94,94,0.14); border-color: var(--accent);
+  border-radius: 4px; width: 100%;
 }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 12px 24px; }
@@ -88,14 +76,9 @@ input:focus, select:focus, textarea:focus {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .success { background: var(--good-bg); border: 1px solid #bbf7d0;
-           color: var(--good); padding: 12px 14px; border-radius: 8px; }
+           color: var(--good); padding: 16px; border-radius: 8px; }
 .error { background: var(--bad-bg); border: 1px solid #fecaca;
-         color: var(--bad); padding: 12px 14px; border-radius: 8px; }
-@media (max-width: 760px) {
-  body { padding: 16px 10px 28px; }
-  nav { overflow-x: auto; align-items: stretch; }
-  nav a, nav button.logout { white-space: nowrap; }
-}
+         color: var(--bad); padding: 16px; border-radius: 8px; }
 """
 
 _NAV = """<nav>
@@ -300,83 +283,43 @@ AUDIT_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Catalog audit</title>
 <style>""" + _COMMON_CSS + """
-.audit-shell { background: rgba(255,255,255,0.72); border: 1px solid var(--border);
-               border-radius: 8px; padding: 16px; box-shadow: 0 18px 42px rgba(31,41,51,0.07); }
-.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: end;
-             margin-bottom: 18px; padding: 18px 20px; border-radius: 8px;
-             background: linear-gradient(135deg, #0f5e5e 0%, #2f6f63 56%, #7c6f44 100%);
-             color: white; }
-.page-head h1 { color: white; }
-.page-head .subtitle { color: rgba(255,255,255,0.86); margin-bottom: 0; max-width: 720px; }
-.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-.search-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px auto auto;
-                  background: var(--surface); border: 1px solid var(--border);
-                  border-radius: 8px; padding: 10px; box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
-.bulk-toolbar { background: var(--surface); border: 1px solid var(--border);
-                border-radius: 8px; padding: 10px; flex-wrap: wrap;
-                box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
-.bulk-toolbar .opt { margin-right: auto; }
-.bulk-toolbar button { white-space: nowrap; }
+.toolbar { display: grid; grid-template-columns: 1fr 180px auto auto; gap: 8px;
+           align-items: center; margin-bottom: 16px; }
 .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-           gap: 10px; margin: 18px 0; }
-.metric { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-          padding: 12px 14px; box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
-.metric strong { display: block; font-size: 21px; line-height: 1; }
-.metric span { color: var(--muted); font-size: 12px; font-weight: 700; }
-.metric.priority { border-color: #f2c96d; background: #fff9eb; }
-.metric.critical { border-color: #f1b8b8; background: #fff5f5; }
+           gap: 8px; margin-bottom: 16px; }
+.metric { background: white; border: 1px solid var(--border); border-radius: 6px;
+          padding: 10px 12px; }
+.metric strong { display: block; font-size: 18px; }
+.metric span { color: var(--muted); font-size: 12px; }
 .audit-row { background: white; border: 1px solid var(--border); border-radius: 8px;
-             border-left: 5px solid var(--accent); padding: 16px; margin-bottom: 12px;
-             box-shadow: 0 8px 26px rgba(31,41,51,0.05); }
-.audit-row:hover { border-color: var(--border-strong); }
+             padding: 14px 16px; margin-bottom: 10px; }
 .audit-head { display: grid; grid-template-columns: 1fr auto; gap: 12px;
               align-items: start; }
-.audit-head h2 { margin: 0 0 6px; font-size: 17px; line-height: 1.25; }
+.audit-head h2 { margin: 0 0 4px; }
 .audit-meta { color: var(--muted); font-size: 12px; }
-.product-check { display: flex; gap: 10px; align-items: flex-start; }
-.product-check input { margin-top: 4px; width: 16px; height: 16px; accent-color: var(--accent); }
-.product-title { display: block; overflow-wrap: anywhere; }
-.issue-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-.issue { display: inline-block; padding: 3px 8px; border-radius: 999px;
+.issue-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.issue { display: inline-block; padding: 2px 7px; border-radius: 4px;
          font-size: 11px; font-weight: 600; }
 .issue.high { background: var(--bad-bg); color: var(--bad); }
 .issue.medium { background: var(--warn-bg); color: var(--warn); }
 .issue.low { background: #f3f4f6; color: #4b5563; }
-.price-stack { min-width: 120px; background: var(--surface-soft); border: 1px solid var(--border);
-               border-radius: 8px; padding: 10px 12px; }
-.price-stack small { color: var(--muted); }
-.audit-actions { display: grid; grid-template-columns: minmax(280px, 1.15fr) minmax(280px, 0.85fr); gap: 12px;
+.audit-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
                  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-.action-panel { background: var(--surface-soft); border: 1px solid var(--border);
-                border-radius: 8px; padding: 12px; }
-.section-block { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-.action-row { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
 .audit-actions textarea { width: 100%; min-height: 110px; font: 12px/1.4 ui-monospace, monospace;
-                          padding: 10px; border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
+                          padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
 .price-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .price-box input { width: 100px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
-#bulkMsg { margin-bottom: 12px; }
 @media (max-width: 760px) {
-  .page-head, .toolbar, .search-toolbar, .audit-actions, .audit-head { display: grid; grid-template-columns: 1fr; }
-  .audit-shell { padding: 10px; }
-  .page-head { padding: 16px; }
-  .bulk-toolbar .opt { margin-right: 0; }
-  .bulk-toolbar button { width: 100%; }
-  .price-stack { min-width: 0; }
+  .toolbar, .audit-actions, .audit-head { grid-template-columns: 1fr; }
 }
 </style></head><body>
 <div class="container">
 """ + _NAV.replace('id="nav-audit">Catalog audit<', 'id="nav-audit" class="active">Catalog audit<') + """
-  <div class="audit-shell">
-  <div class="page-head">
-    <div>
-      <h1>Catalog audit</h1>
-      <p class="subtitle">Review existing Lightspeed products for missing photos, weak descriptions, and pricing below target.</p>
-    </div>
-  </div>
+  <h1>Catalog audit</h1>
+  <p class="subtitle">Review existing Lightspeed products for missing photos, weak descriptions, and pricing below target.</p>
 
-  <div class="toolbar search-toolbar">
+  <div class="toolbar">
     <input type="text" id="q" placeholder="Search name, SKU, barcode, supplier code" onkeydown="if(event.key==='Enter') load()" />
     <select id="issue" onchange="load()">
       <option value="all">All issues</option>
@@ -396,7 +339,7 @@ AUDIT_HTML = """<!DOCTYPE html>
     <button class="secondary" onclick="load()">Search</button>
     <button class="primary" id="syncBtn" onclick="syncCatalog()">Sync catalog</button>
   </div>
-  <div class="toolbar bulk-toolbar">
+  <div class="toolbar">
     <label class="opt"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" /> Select all visible</label>
     <button class="secondary" id="bulkDraftMissingBtn" onclick="bulkDraftMissingDescriptions()">Draft missing descriptions</button>
     <button class="secondary" id="bulkDraftBtn" onclick="bulkDraftDescriptions()">Draft selected descriptions</button>
@@ -410,7 +353,6 @@ AUDIT_HTML = """<!DOCTYPE html>
 
   <div id="summary" class="summary"></div>
   <div id="content"><p style="color:var(--muted)">Loading...</p></div>
-  </div>
 </div>
 <script>
 let PRODUCTS = [];
@@ -454,20 +396,20 @@ async function syncCatalog() {
 
 function renderSummary(s, shown, issue) {
   const items = [
-    ['Products', s.products || 0, ''],
-    ['Showing', shown || 0, ''],
-    ['With issues', s.with_issues || 0, 'priority'],
-    ['Missing photos', s.missing_photo || 0, 'priority'],
-    ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0), 'priority'],
-    ['Below target', s.below_target_margin || 0, 'critical'],
-    ['Tracking off', s.inventory_tracking_off || 0, 'critical'],
-    ['Missing barcodes', s.missing_barcode || 0, 'priority'],
-    ['Missing SKUs', s.missing_sku || 0, 'priority'],
-    ['Generated SKUs', s.generated_sku || 0, ''],
-    ['Missing codes', s.missing_barcode_sku || 0, 'critical'],
+    ['Products', s.products || 0],
+    ['Showing', shown || 0],
+    ['With issues', s.with_issues || 0],
+    ['Missing photos', s.missing_photo || 0],
+    ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
+    ['Below target', s.below_target_margin || 0],
+    ['Tracking off', s.inventory_tracking_off || 0],
+    ['Missing barcodes', s.missing_barcode || 0],
+    ['Missing SKUs', s.missing_sku || 0],
+    ['Generated SKUs', s.generated_sku || 0],
+    ['Missing codes', s.missing_barcode_sku || 0],
   ];
-  document.getElementById('summary').innerHTML = items.map(([label, value, tone]) =>
-    '<div class="metric ' + tone + '"><strong>' + value + '</strong><span>' + label + '</span></div>'
+  document.getElementById('summary').innerHTML = items.map(([label, value]) =>
+    '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
   ).join('') + (issue && issue !== 'all'
     ? '<div class="audit-meta" style="grid-column:1/-1">Filtered by ' + escape(issue.replaceAll('_', ' ')) + '</div>'
     : '');
@@ -489,39 +431,39 @@ function renderProduct(p) {
   const price = p.retail_price == null ? '—' : '$' + p.retail_price.toFixed(2);
   const target = p.target_price == null ? '—' : '$' + p.target_price.toFixed(2);
   const skuControls = p.sku ? '' : (
-    '<div class="section-block"><h2>Custom SKU</h2>'
+    '<div style="margin-top:12px"><h2>Custom SKU</h2>'
     + '<div class="price-box"><input type="text" id="sku-' + p.id + '" value="'
     + escape(p.suggested_custom_sku || '') + '" />'
     + '<button class="primary" onclick="applySku(\\'' + p.id + '\\')">Assign SKU</button></div></div>'
   );
   const barcodeSkuControls = (!p.barcode || p.is_generated_sku) ? (
-    '<div class="section-block"><h2>Barcode/SKU</h2>'
+    '<div style="margin-top:12px"><h2>Barcode/SKU</h2>'
     + '<div class="price-box"><input type="text" id="barcode-sku-' + p.id + '" value="'
     + escape(p.is_generated_sku ? '' : (p.barcode || p.sku || '')) + '" placeholder="Scan or type barcode" />'
     + '<button class="primary" onclick="applyBarcodeSku(\\'' + p.id + '\\')">Update barcode/SKU</button></div></div>'
   ) : '';
   const inventoryControls = p.has_inventory === false ? (
-    '<div class="section-block"><h2>Inventory</h2>'
+    '<div style="margin-top:12px"><h2>Inventory</h2>'
     + '<button class="primary" onclick="enableTracking(\\'' + p.id + '\\')">Enable tracking</button>'
     + '<div class="audit-meta">Turns on Track inventory for this product in Lightspeed.</div></div>'
   ) : '';
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
-    + '<h2><label class="product-check"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
-    + '<span class="product-title">' + escape(p.name || '(unnamed product)') + '</span></label></h2>'
+    + '<h2><label class="opt"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
+    + escape(p.name || '(unnamed product)') + '</label></h2>'
     + '<div class="audit-meta">'
     + 'SKU ' + escape(p.sku || '—') + ' · Barcode ' + escape(p.barcode || '—')
     + ' · Brand ' + escape(p.brand_name || '—') + ' · Category ' + escape(p.category_name || '—')
     + '</div><div class="issue-list">' + issues + '</div></div>'
-    + '<div class="num price-stack">Retail<br><strong>' + price + '</strong><br><small>Target ' + target + '</small></div></div>'
+    + '<div class="num">Retail ' + price + '<br><small>Target ' + target + '</small></div></div>'
     + '<div class="audit-actions">'
-    + '<div class="action-panel"><h2>Description</h2>'
+    + '<div><h2>Description</h2>'
     + '<textarea id="desc-' + p.id + '">' + escape(p.description || '') + '</textarea>'
-    + '<div class="action-row">'
+    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
     + '<button class="secondary" onclick="draftDescription(\\'' + p.id + '\\')">Draft with OpenAI</button>'
     + '<button class="primary" onclick="applyDescription(\\'' + p.id + '\\')">Approve description</button>'
     + '</div></div>'
-    + '<div class="action-panel"><h2>Pricing & photo</h2>'
+    + '<div><h2>Pricing & photo</h2>'
     + inventoryControls
     + '<div class="price-box">$<input type="number" step="0.01" id="price-' + p.id + '" value="'
     + (p.target_price != null ? p.target_price.toFixed(2) : '') + '" />'
