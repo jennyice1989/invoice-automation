@@ -17,7 +17,8 @@ body { font: 15px/1.5 system-ui, -apple-system, sans-serif;
 .container { max-width: 1100px; margin: 0 auto; }
 nav { display: flex; gap: 16px; margin-bottom: 24px; font-size: 14px;
       padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-nav a { color: var(--muted); text-decoration: none; }
+nav a { color: var(--muted); text-decoration: none; padding: 4px 0;
+        font-weight: 600; }
 nav a:hover, nav a.active { color: var(--fg); }
 nav .grow { flex: 1; }
 nav form { display: inline; }
@@ -28,7 +29,8 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 h2 { font-size: 16px; margin: 0 0 12px; }
 .subtitle { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
 .card { background: white; border: 1px solid var(--border);
-        border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+        border-radius: 8px; padding: 20px; margin-bottom: 16px;
+        box-shadow: 0 1px 2px rgba(28,25,23,0.04); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 12px;
          border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -50,18 +52,22 @@ th { font-weight: 600; color: var(--muted); font-size: 12px;
 button.primary {
   background: var(--accent); color: white; border: none;
   padding: 10px 20px; border-radius: 6px; font-size: 14px;
-  font-weight: 500; cursor: pointer;
+  font-weight: 600; cursor: pointer;
 }
 button.primary:hover { background: #075985; }
 button.primary:disabled { background: var(--muted); cursor: not-allowed; }
 button.secondary {
   background: white; color: var(--fg); border: 1px solid var(--border);
-  padding: 6px 12px; border-radius: 4px; font-size: 13px; cursor: pointer;
+  padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  font-weight: 600;
 }
 button.secondary:hover { border-color: var(--accent); color: var(--accent); }
-input[type=text], input[type=password], input[type=number] {
+input[type=text], input[type=password], input[type=number], select {
   font: inherit; padding: 8px 10px; border: 1px solid var(--border);
-  border-radius: 4px; width: 100%;
+  border-radius: 6px; width: 100%; background: white; color: var(--fg);
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--accent-soft); border-color: var(--accent);
 }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 12px 24px; }
@@ -288,17 +294,19 @@ AUDIT_HTML = """<!DOCTYPE html>
 .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
            gap: 8px; margin-bottom: 16px; }
 .metric { background: white; border: 1px solid var(--border); border-radius: 6px;
-          padding: 10px 12px; }
+          padding: 10px 12px; box-shadow: 0 1px 2px rgba(28,25,23,0.04); }
 .metric strong { display: block; font-size: 18px; }
-.metric span { color: var(--muted); font-size: 12px; }
+.metric span { color: var(--muted); font-size: 12px; font-weight: 600; }
 .audit-row { background: white; border: 1px solid var(--border); border-radius: 8px;
-             padding: 14px 16px; margin-bottom: 10px; }
+             padding: 14px 16px; margin-bottom: 10px;
+             box-shadow: 0 1px 2px rgba(28,25,23,0.04); }
+.audit-row:hover { border-color: #d6d3d1; }
 .audit-head { display: grid; grid-template-columns: 1fr auto; gap: 12px;
               align-items: start; }
 .audit-head h2 { margin: 0 0 4px; }
 .audit-meta { color: var(--muted); font-size: 12px; }
 .issue-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-.issue { display: inline-block; padding: 2px 7px; border-radius: 4px;
+.issue { display: inline-block; padding: 3px 8px; border-radius: 999px;
          font-size: 11px; font-weight: 600; }
 .issue.high { background: var(--bad-bg); color: var(--bad); }
 .issue.medium { background: var(--warn-bg); color: var(--warn); }
@@ -306,7 +314,7 @@ AUDIT_HTML = """<!DOCTYPE html>
 .audit-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
                  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .audit-actions textarea { width: 100%; min-height: 110px; font: 12px/1.4 ui-monospace, monospace;
-                          padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+                          padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
 .price-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .price-box input { width: 100px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
