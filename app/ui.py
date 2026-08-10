@@ -300,9 +300,18 @@ AUDIT_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Catalog audit</title>
 <style>""" + _COMMON_CSS + """
-.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 18px; }
+.audit-shell { background: rgba(255,255,255,0.72); border: 1px solid var(--border);
+               border-radius: 8px; padding: 16px; box-shadow: 0 18px 42px rgba(31,41,51,0.07); }
+.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: end;
+             margin-bottom: 18px; padding: 18px 20px; border-radius: 8px;
+             background: linear-gradient(135deg, #0f5e5e 0%, #2f6f63 56%, #7c6f44 100%);
+             color: white; }
+.page-head h1 { color: white; }
+.page-head .subtitle { color: rgba(255,255,255,0.86); margin-bottom: 0; max-width: 720px; }
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-.search-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px auto auto; }
+.search-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px auto auto;
+                  background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 10px; box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
 .bulk-toolbar { background: var(--surface); border: 1px solid var(--border);
                 border-radius: 8px; padding: 10px; flex-wrap: wrap;
                 box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
@@ -314,8 +323,11 @@ AUDIT_HTML = """<!DOCTYPE html>
           padding: 12px 14px; box-shadow: 0 8px 24px rgba(31,41,51,0.04); }
 .metric strong { display: block; font-size: 21px; line-height: 1; }
 .metric span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.metric.priority { border-color: #f2c96d; background: #fff9eb; }
+.metric.critical { border-color: #f1b8b8; background: #fff5f5; }
 .audit-row { background: white; border: 1px solid var(--border); border-radius: 8px;
-             padding: 16px; margin-bottom: 12px; box-shadow: 0 8px 26px rgba(31,41,51,0.05); }
+             border-left: 5px solid var(--accent); padding: 16px; margin-bottom: 12px;
+             box-shadow: 0 8px 26px rgba(31,41,51,0.05); }
 .audit-row:hover { border-color: var(--border-strong); }
 .audit-head { display: grid; grid-template-columns: 1fr auto; gap: 12px;
               align-items: start; }
@@ -347,6 +359,8 @@ AUDIT_HTML = """<!DOCTYPE html>
 #bulkMsg { margin-bottom: 12px; }
 @media (max-width: 760px) {
   .page-head, .toolbar, .search-toolbar, .audit-actions, .audit-head { display: grid; grid-template-columns: 1fr; }
+  .audit-shell { padding: 10px; }
+  .page-head { padding: 16px; }
   .bulk-toolbar .opt { margin-right: 0; }
   .bulk-toolbar button { width: 100%; }
   .price-stack { min-width: 0; }
@@ -354,6 +368,7 @@ AUDIT_HTML = """<!DOCTYPE html>
 </style></head><body>
 <div class="container">
 """ + _NAV.replace('id="nav-audit">Catalog audit<', 'id="nav-audit" class="active">Catalog audit<') + """
+  <div class="audit-shell">
   <div class="page-head">
     <div>
       <h1>Catalog audit</h1>
@@ -395,6 +410,7 @@ AUDIT_HTML = """<!DOCTYPE html>
 
   <div id="summary" class="summary"></div>
   <div id="content"><p style="color:var(--muted)">Loading...</p></div>
+  </div>
 </div>
 <script>
 let PRODUCTS = [];
@@ -438,20 +454,20 @@ async function syncCatalog() {
 
 function renderSummary(s, shown, issue) {
   const items = [
-    ['Products', s.products || 0],
-    ['Showing', shown || 0],
-    ['With issues', s.with_issues || 0],
-    ['Missing photos', s.missing_photo || 0],
-    ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
-    ['Below target', s.below_target_margin || 0],
-    ['Tracking off', s.inventory_tracking_off || 0],
-    ['Missing barcodes', s.missing_barcode || 0],
-    ['Missing SKUs', s.missing_sku || 0],
-    ['Generated SKUs', s.generated_sku || 0],
-    ['Missing codes', s.missing_barcode_sku || 0],
+    ['Products', s.products || 0, ''],
+    ['Showing', shown || 0, ''],
+    ['With issues', s.with_issues || 0, 'priority'],
+    ['Missing photos', s.missing_photo || 0, 'priority'],
+    ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0), 'priority'],
+    ['Below target', s.below_target_margin || 0, 'critical'],
+    ['Tracking off', s.inventory_tracking_off || 0, 'critical'],
+    ['Missing barcodes', s.missing_barcode || 0, 'priority'],
+    ['Missing SKUs', s.missing_sku || 0, 'priority'],
+    ['Generated SKUs', s.generated_sku || 0, ''],
+    ['Missing codes', s.missing_barcode_sku || 0, 'critical'],
   ];
-  document.getElementById('summary').innerHTML = items.map(([label, value]) =>
-    '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
+  document.getElementById('summary').innerHTML = items.map(([label, value, tone]) =>
+    '<div class="metric ' + tone + '"><strong>' + value + '</strong><span>' + label + '</span></div>'
   ).join('') + (issue && issue !== 'all'
     ? '<div class="audit-meta" style="grid-column:1/-1">Filtered by ' + escape(issue.replaceAll('_', ' ')) + '</div>'
     : '');
