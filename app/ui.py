@@ -341,6 +341,7 @@ AUDIT_HTML = """<!DOCTYPE html>
   </div>
   <div class="toolbar">
     <label class="opt"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" /> Select all visible</label>
+    <button class="secondary" id="bulkDraftMissingBtn" onclick="bulkDraftMissingDescriptions()">Draft missing descriptions</button>
     <button class="secondary" id="bulkDraftBtn" onclick="bulkDraftDescriptions()">Draft selected descriptions</button>
     <button class="primary" id="bulkDescBtn" onclick="bulkApplyDescriptions()">Approve selected descriptions</button>
     <button class="primary" id="bulkPriceBtn" onclick="bulkApplyPrices()">Approve selected prices</button>
@@ -496,7 +497,7 @@ function enforceBulkLimit(changed) {
 }
 
 function setBulkBusy(busy) {
-  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkTrackBtn', 'bulkSkuBtn', 'bulkBarcodeSkuBtn', 'syncBtn'].forEach(id => {
+  ['bulkDraftMissingBtn', 'bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkTrackBtn', 'bulkSkuBtn', 'bulkBarcodeSkuBtn', 'syncBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = busy;
   });
@@ -540,6 +541,38 @@ async function bulkDraftDescriptions() {
       }
     });
     showBulk('Drafted ' + data.succeeded + ' of ' + data.requested + ' selected product(s).', data.failed ? 'error' : 'success');
+  } finally {
+    setBulkBusy(false);
+  }
+}
+
+async function bulkDraftMissingDescriptions() {
+  const q = document.getElementById('q').value.trim();
+  setBulkBusy(true);
+  showBulk('Drafting up to ' + BULK_LIMIT + ' missing description(s)...', 'success');
+  try {
+    const resp = await fetch('/audit/bulk/draft-missing-descriptions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ limit: BULK_LIMIT, q: q || null }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showBulk(data.detail || resp.statusText, 'error');
+      return;
+    }
+    (data.results || []).forEach(r => {
+      if (r.ok) {
+        const textarea = document.getElementById('desc-' + r.product_id);
+        if (textarea) textarea.value = r.description || '';
+        showItemMessage(r.product_id, 'Draft ready. Review it, then approve.', 'success');
+      } else {
+        showItemMessage(r.product_id, r.error || 'Draft failed', 'error');
+      }
+    });
+    const total = data.total_matching || data.requested || 0;
+    const more = total > data.requested ? ' Run again after approving or reloading for the next batch.' : '';
+    showBulk('Drafted ' + data.succeeded + ' of ' + data.requested + ' missing description product(s).' + more, data.failed ? 'error' : 'success');
   } finally {
     setBulkBusy(false);
   }

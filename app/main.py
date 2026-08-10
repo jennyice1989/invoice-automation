@@ -796,6 +796,11 @@ class AuditBulkDraftRequest(BaseModel):
     product_ids: list[str] = Field(default_factory=list)
 
 
+class AuditBulkMissingDraftRequest(BaseModel):
+    limit: int = 50
+    q: str | None = None
+
+
 class AuditBulkApplyItem(AuditApplyRequest):
     product_id: str
 
@@ -1040,7 +1045,14 @@ async def bulk_draft_audit_descriptions(
     body: AuditBulkDraftRequest,
     session: AsyncSession = Depends(_session),
 ):
-    product_ids = [pid for pid in dict.fromkeys(body.product_ids) if pid]
+    return await _bulk_draft_audit_descriptions_for_ids(body.product_ids, session)
+
+
+async def _bulk_draft_audit_descriptions_for_ids(
+    requested_product_ids: list[str],
+    session: AsyncSession,
+) -> dict:
+    product_ids = [pid for pid in dict.fromkeys(requested_product_ids) if pid]
     if not product_ids:
         raise HTTPException(400, "Select at least one product")
     if len(product_ids) > 50:
@@ -1065,6 +1077,27 @@ async def bulk_draft_audit_descriptions(
         "failed": sum(1 for item in results if not item.get("ok")),
         "results": results,
     }
+
+
+@app.post("/audit/bulk/draft-missing-descriptions", dependencies=[Depends(require_auth)])
+async def bulk_draft_missing_audit_descriptions(
+    body: AuditBulkMissingDraftRequest,
+    session: AsyncSession = Depends(_session),
+):
+    limit = max(1, min(body.limit, 50))
+    audit = await audit_catalog(
+        session,
+        issue="missing_description",
+        query=body.q,
+        limit=limit,
+        offset=0,
+    )
+    product_ids = [item["id"] for item in audit.get("data", []) if item.get("id")]
+    if not product_ids:
+        raise HTTPException(400, "No missing descriptions found for this search")
+    result = await _bulk_draft_audit_descriptions_for_ids(product_ids, session)
+    result["total_matching"] = audit.get("total", len(product_ids))
+    return result
 
 
 @app.post("/audit/bulk/apply", dependencies=[Depends(require_auth)])
