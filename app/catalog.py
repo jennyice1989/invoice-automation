@@ -58,6 +58,10 @@ def product_to_cache_fields(product: dict, synced_at: datetime) -> dict:
         or product.get("category_name"),
         "supply_price": product.get("supply_price"),
         "retail_price": product.get("price_excluding_tax"),
+        "has_inventory": (
+            bool(product.get("has_inventory"))
+            if "has_inventory" in product else None
+        ),
         "active": product.get("active") is not False,
         "deleted_at": product.get("deleted_at"),
         "raw": product,
@@ -77,6 +81,7 @@ def cache_product_to_dict(product: Any) -> dict:
         "brand_name": product.brand_name,
         "supply_price": product.supply_price,
         "price_excluding_tax": product.retail_price,
+        "has_inventory": product.has_inventory,
         "active": product.active,
         "deleted_at": product.deleted_at,
     }

@@ -22,6 +22,7 @@ def _product(**kwargs) -> CatalogProduct:
         "category_name": "Category",
         "supply_price": 10.00,
         "retail_price": 12.99,
+        "has_inventory": True,
         "active": True,
         "raw": {},
     }
@@ -42,6 +43,15 @@ def test_audit_flags_missing_content_and_price_below_target():
     assert "missing_photo" in codes
     assert "below_target_margin" in codes
     assert result["target_price"] == 15.49
+
+
+def test_audit_flags_inventory_tracking_off():
+    result = audit_product(_product(has_inventory=False, retail_price=19.99))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert "inventory_tracking_off" in codes
+    assert result["has_inventory"] is False
+    assert audit_item_matches_filter(result, issue="inventory_tracking_off")
 
 
 def test_audit_accepts_description_and_image_fields():

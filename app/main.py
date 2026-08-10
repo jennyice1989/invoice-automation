@@ -783,6 +783,7 @@ async def sync_audit_catalog(session: AsyncSession = Depends(_session)):
 class AuditApplyRequest(BaseModel):
     approve_price: bool = False
     retail_price: float | None = None
+    enable_inventory_tracking: bool = False
     approve_description: bool = False
     description: str | None = None
     approve_sku: bool = False
@@ -892,6 +893,9 @@ async def _apply_audit_product_update(
             raise HTTPException(400, "Approved description is empty")
         update["description"] = description
 
+    if body.enable_inventory_tracking:
+        update["has_inventory"] = True
+
     if body.approve_sku:
         custom_sku = (body.custom_sku or "").strip() or custom_sku_for_product(product)
         if not custom_sku:
@@ -950,6 +954,8 @@ async def _apply_audit_product_update(
             product.retail_price = partial_update["price_excluding_tax"]
         if "supply_price" in partial_update:
             product.supply_price = partial_update["supply_price"]
+        if "has_inventory" in partial_update:
+            product.has_inventory = partial_update["has_inventory"]
         if "supplier_code" in partial_update:
             product.supplier_code = partial_update["supplier_code"]
         if "sku" in partial_update:

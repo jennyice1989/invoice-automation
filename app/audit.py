@@ -142,6 +142,11 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
                 "below_target_margin", "Retail below 1.5x cost target", "high",
             ))
 
+    if product.has_inventory is False:
+        issues.append(AuditIssue(
+            "inventory_tracking_off", "Inventory tracking off", "high",
+        ))
+
     if not product.barcode and not product.sku:
         issues.append(AuditIssue(
             "missing_barcode_sku", "Missing barcode/SKU", "medium",
@@ -182,6 +187,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         "category_name": product.category_name,
         "supply_price": product.supply_price,
         "retail_price": product.retail_price,
+        "has_inventory": product.has_inventory,
         "target_price": target_price,
         "description": description,
         "description_text_length": len(description_text),
@@ -236,6 +242,7 @@ async def audit_catalog(
         "missing_photo": 0,
         "below_target_margin": 0,
         "missing_price": 0,
+        "inventory_tracking_off": 0,
         "missing_barcode_sku": 0,
         "missing_barcode": 0,
         "missing_sku": 0,

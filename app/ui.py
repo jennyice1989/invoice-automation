@@ -328,6 +328,7 @@ AUDIT_HTML = """<!DOCTYPE html>
       <option value="missing_photo">Missing photo</option>
       <option value="below_target_margin">Below target margin</option>
       <option value="missing_price">Missing price</option>
+      <option value="inventory_tracking_off">Inventory tracking off</option>
       <option value="missing_barcode">Missing barcode</option>
       <option value="missing_sku">Missing SKU</option>
       <option value="generated_sku">Generated/internal SKU</option>
@@ -343,6 +344,7 @@ AUDIT_HTML = """<!DOCTYPE html>
     <button class="secondary" id="bulkDraftBtn" onclick="bulkDraftDescriptions()">Draft selected descriptions</button>
     <button class="primary" id="bulkDescBtn" onclick="bulkApplyDescriptions()">Approve selected descriptions</button>
     <button class="primary" id="bulkPriceBtn" onclick="bulkApplyPrices()">Approve selected prices</button>
+    <button class="primary" id="bulkTrackBtn" onclick="bulkEnableTracking()">Enable selected tracking</button>
     <button class="primary" id="bulkSkuBtn" onclick="bulkApplySkus()">Assign selected SKUs</button>
     <button class="primary" id="bulkBarcodeSkuBtn" onclick="bulkApplyBarcodeSkus()">Update selected barcode/SKUs</button>
   </div>
@@ -399,6 +401,7 @@ function renderSummary(s, shown, issue) {
     ['Missing photos', s.missing_photo || 0],
     ['Weak copy', (s.missing_description || 0) + (s.weak_description || 0)],
     ['Below target', s.below_target_margin || 0],
+    ['Tracking off', s.inventory_tracking_off || 0],
     ['Missing barcodes', s.missing_barcode || 0],
     ['Missing SKUs', s.missing_sku || 0],
     ['Generated SKUs', s.generated_sku || 0],
@@ -438,6 +441,11 @@ function renderProduct(p) {
     + escape(p.is_generated_sku ? '' : (p.barcode || p.sku || '')) + '" placeholder="Scan or type barcode" />'
     + '<button class="primary" onclick="applyBarcodeSku(\\'' + p.id + '\\')">Update barcode/SKU</button></div></div>'
   ) : '';
+  const inventoryControls = p.has_inventory === false ? (
+    '<div style="margin-top:12px"><h2>Inventory</h2>'
+    + '<button class="primary" onclick="enableTracking(\\'' + p.id + '\\')">Enable tracking</button>'
+    + '<div class="audit-meta">Turns on Track inventory for this product in Lightspeed.</div></div>'
+  ) : '';
   return '<div class="audit-row" id="row-' + p.id + '">'
     + '<div class="audit-head"><div>'
     + '<h2><label class="opt"><input type="checkbox" class="product-select" onchange="enforceBulkLimit(this)" value="' + escape(p.id) + '" /> '
@@ -455,6 +463,7 @@ function renderProduct(p) {
     + '<button class="primary" onclick="applyDescription(\\'' + p.id + '\\')">Approve description</button>'
     + '</div></div>'
     + '<div><h2>Pricing & photo</h2>'
+    + inventoryControls
     + '<div class="price-box">$<input type="number" step="0.01" id="price-' + p.id + '" value="'
     + (p.target_price != null ? p.target_price.toFixed(2) : '') + '" />'
     + '<button class="primary" onclick="applyPrice(\\'' + p.id + '\\')">Approve price</button></div>'
@@ -487,7 +496,7 @@ function enforceBulkLimit(changed) {
 }
 
 function setBulkBusy(busy) {
-  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkSkuBtn', 'bulkBarcodeSkuBtn', 'syncBtn'].forEach(id => {
+  ['bulkDraftBtn', 'bulkDescBtn', 'bulkPriceBtn', 'bulkTrackBtn', 'bulkSkuBtn', 'bulkBarcodeSkuBtn', 'syncBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = busy;
   });
@@ -563,6 +572,14 @@ async function bulkApplyPrices() {
   }
   if (!updates.length) { showBulk('No selected products have valid prices.', 'error'); return; }
   await bulkApply(updates, 'price');
+}
+
+async function bulkEnableTracking() {
+  const ids = selectedProductIds();
+  if (!ids.length) { showBulk('Select at least one product.', 'error'); return; }
+  if (ids.length > BULK_LIMIT) { showBulk('Bulk operations are limited to ' + BULK_LIMIT + ' products at a time.', 'error'); return; }
+  const updates = ids.map(id => ({ product_id: id, enable_inventory_tracking: true }));
+  await bulkApply(updates, 'inventory tracking');
 }
 
 async function bulkApplySkus() {
@@ -660,6 +677,10 @@ async function applyPrice(id) {
   const price = parseFloat(document.getElementById('price-' + id).value);
   if (isNaN(price)) { alert('Enter an approved price.'); return; }
   await applyUpdate(id, { approve_price: true, retail_price: price });
+}
+
+async function enableTracking(id) {
+  await applyUpdate(id, { enable_inventory_tracking: true });
 }
 
 async function applySku(id) {

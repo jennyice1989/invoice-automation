@@ -98,6 +98,7 @@ class CatalogProduct(Base):
     category_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     supply_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     retail_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    has_inventory: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     deleted_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     raw: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -421,6 +422,7 @@ async def init_db() -> None:
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS category_name VARCHAR(255)",
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS supply_price DOUBLE PRECISION",
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS retail_price DOUBLE PRECISION",
+            "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS has_inventory BOOLEAN",
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS deleted_at VARCHAR(64)",
             "ALTER TABLE catalog_products ADD COLUMN IF NOT EXISTS raw JSONB",

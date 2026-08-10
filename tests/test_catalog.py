@@ -19,6 +19,7 @@ def test_product_to_cache_fields_normalizes_common_values():
             "brand": {"name": "Seachem"},
             "supply_price": 3.05,
             "price_excluding_tax": 6.99,
+            "has_inventory": True,
         },
         datetime(2026, 1, 1),
     )
@@ -27,6 +28,7 @@ def test_product_to_cache_fields_normalizes_common_values():
     assert fields["normalized_name"] == "seachem shrimp accessories tube asm7078"
     assert fields["barcode"] == "000116070782"
     assert fields["brand_name"] == "Seachem"
+    assert fields["has_inventory"] is True
     assert fields["active"] is True
 
 
