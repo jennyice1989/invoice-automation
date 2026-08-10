@@ -790,6 +790,7 @@ class LightspeedClient:
         *,
         retail_price: float | None = None,
         supply_price: float | None = None,
+        has_inventory: bool | None = None,
         sku: str | None = None,
         barcode: str | None = None,
         supplier_code: str | None = None,
@@ -806,6 +807,8 @@ class LightspeedClient:
             payload["price_excluding_tax"] = retail_price
         if supply_price is not None:
             payload["supply_price"] = supply_price
+        if has_inventory is not None:
+            payload["has_inventory"] = has_inventory
         if sku is not None:
             payload["sku"] = sku
         if barcode is not None:

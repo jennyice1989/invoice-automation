@@ -1510,6 +1510,7 @@ class OrderCostIn(BaseModel):
 class FinalizeRequest(BaseModel):
     invoice_id: int
     receive_immediately: bool = False
+    track_inventory_for_products: bool = True
     update_costs_for_existing: bool = True
     additional_costs: list[OrderCostIn] = Field(default_factory=list)
     # Decisions for uncertain/new lines, keyed by index into the uncertain list
@@ -1638,9 +1639,10 @@ async def finalize_invoice(
             "reason": reason,
         })
 
-    # 1. Matched lines: optionally update existing product costs, queue for consignment
+    # 1. Matched lines: optionally update existing product costs, make sure
+    # products are inventory-tracked, queue for consignment.
     for idx, m in enumerate(matched):
-        if body.update_costs_for_existing:
+        if body.update_costs_for_existing or body.track_inventory_for_products:
             try:
                 retail = body.matched_overrides.get(str(idx)) \
                     or body.matched_overrides.get(idx)
@@ -1650,11 +1652,14 @@ async def finalize_invoice(
                     existing_retail,
                     retail,
                 )
-                upd = {}
-                if should_update_retail:
-                    upd["retail_price"] = float(retail)
                 landed_cost = _landed_unit_cost(m["quantity"], m["unit_cost"])
-                upd["supply_price"] = landed_cost
+                upd = {}
+                if body.update_costs_for_existing:
+                    if should_update_retail:
+                        upd["retail_price"] = float(retail)
+                    upd["supply_price"] = landed_cost
+                if body.track_inventory_for_products:
+                    upd["has_inventory"] = True
                 result = await client.update_product(m["product_id"], **upd)
                 if result is None:
                     # Update was skipped (e.g., 404) — note it but proceed.
@@ -1683,6 +1688,7 @@ async def finalize_invoice(
                         "new_retail_price": (
                             retail if should_update_retail else None
                         ),
+                        "inventory_tracking": body.track_inventory_for_products,
                     })
             except LightspeedError as exc:
                 errors.append(f"Failed to update {m.get('product_name')}: {exc}")
@@ -1731,7 +1737,7 @@ async def finalize_invoice(
                     lightspeed_product_id=dec.lightspeed_product_id,
                     status="linked",
                 )
-            if body.update_costs_for_existing:
+            if body.update_costs_for_existing or body.track_inventory_for_products:
                 try:
                     product = await _get_existing_product(dec.lightspeed_product_id)
                     existing_retail = _existing_retail(product)
@@ -1740,9 +1746,13 @@ async def finalize_invoice(
                         dec.retail_price_override,
                     )
                     landed_cost = _landed_unit_cost(dec.quantity, dec.unit_cost)
-                    upd = {"supply_price": landed_cost}
-                    if should_update_retail:
-                        upd["retail_price"] = dec.retail_price_override
+                    upd = {}
+                    if body.update_costs_for_existing:
+                        upd["supply_price"] = landed_cost
+                        if should_update_retail:
+                            upd["retail_price"] = dec.retail_price_override
+                    if body.track_inventory_for_products:
+                        upd["has_inventory"] = True
                     result = await client.update_product(
                         dec.lightspeed_product_id, **upd
                     )
@@ -1774,6 +1784,7 @@ async def finalize_invoice(
                                 dec.retail_price_override
                                 if should_update_retail else None
                             ),
+                            "inventory_tracking": body.track_inventory_for_products,
                         })
                 except LightspeedError as exc:
                     errors.append(f"Failed to update: {exc}")
@@ -1800,6 +1811,7 @@ async def finalize_invoice(
                     barcode=dec.barcode,
                     supply_price=landed_cost,
                     retail_price=dec.new_retail_price,
+                    has_inventory=body.track_inventory_for_products,
                 )
                 new_id = created.get("id")
                 if not new_id:

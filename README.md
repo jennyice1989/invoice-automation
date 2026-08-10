@@ -55,12 +55,13 @@ Visit your Render URL, enter `APP_PASSWORD`. Cookie is valid for 30 days.
 - **Uncertain** lines need a decision: pick a candidate, search Lightspeed,
   create a new product, or skip.
 
-**Push to Lightspeed.** Creates new products, updates costs on matched
-products, and creates the consignment. Retail price recommendations are
-uploaded only for lines you approve on the review screen. Optionally mark
-RECEIVED to update inventory immediately. (Once RECEIVED, received
-quantities are locked; queued enrichment products are received later on
-follow-up consignments.)
+**Push to Lightspeed.** Creates new products, flags imported products for
+inventory tracking, updates costs on matched products, and creates the
+consignment. Retail price recommendations are uploaded only for lines you
+approve on the review screen. Receiving is separate: optionally mark RECEIVED
+only when you want Lightspeed to add stock immediately. (Once RECEIVED,
+received quantities are locked; queued enrichment products are received later
+on follow-up consignments.)
 
 **Add product photos.** On the enrichment review screen, create the product
 first, then upload an approved supplier/manufacturer image or another licensed

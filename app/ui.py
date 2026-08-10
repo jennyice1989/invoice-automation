@@ -908,8 +908,10 @@ function render() {
 
   if (!isImported) {
     html += '<div class="actions">'
+         + '<label class="opt"><input type="checkbox" id="trackInventory" checked />'
+         + 'Track inventory for imported products</label>'
          + '<label class="opt"><input type="checkbox" id="receive" />'
-         + 'Mark RECEIVED immediately (updates inventory)</label>'
+         + 'Mark RECEIVED immediately (adds stock now)</label>'
          + '<label class="opt"><input type="checkbox" id="updateCosts" checked />'
          + 'Update costs on matched products</label>'
          + '<div style="flex-basis:100%;display:flex;gap:8px;align-items:end;flex-wrap:wrap">'
@@ -1140,6 +1142,7 @@ async function finalize() {
   const body = {
     invoice_id: INVOICE_ID,
     receive_immediately: document.getElementById('receive').checked,
+    track_inventory_for_products: document.getElementById('trackInventory').checked,
     update_costs_for_existing: document.getElementById('updateCosts').checked,
     additional_costs: ORDER_COSTS,
     decisions: Object.values(DECISIONS),
