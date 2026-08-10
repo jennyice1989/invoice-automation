@@ -20,6 +20,10 @@ nav { display: flex; gap: 16px; margin-bottom: 24px; font-size: 14px;
 nav a { color: var(--muted); text-decoration: none; padding: 4px 0;
         font-weight: 600; }
 nav a:hover, nav a.active { color: var(--fg); }
+nav .brand { display: flex; align-items: center; gap: 8px; color: var(--fg);
+             padding-right: 6px; }
+nav .brand img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; }
+nav .brand span { font-weight: 700; white-space: nowrap; }
 nav .grow { flex: 1; }
 nav form { display: inline; }
 nav button.logout { background: none; border: none; color: var(--muted);
@@ -85,9 +89,14 @@ input:focus, select:focus, textarea:focus {
            color: var(--good); padding: 16px; border-radius: 8px; }
 .error { background: var(--bad-bg); border: 1px solid #fecaca;
          color: var(--bad); padding: 16px; border-radius: 8px; }
+.brand-lockup { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.brand-lockup img { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; }
+.brand-lockup h1 { margin: 0; }
+.brand-lockup .subtitle { margin: 0; }
 """
 
 _NAV = """<nav>
+<a href="/" class="brand"><img src="/static/a2z-aquariums-logo.png" alt="A2Z Aquariums logo"/><span>A2Z Aquariums</span></a>
 <a href="/" id="nav-home">Upload</a>
 <a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/audit" id="nav-audit">Catalog audit</a>
@@ -107,8 +116,13 @@ LOGIN_HTML = """<!DOCTYPE html>
 .login button { width: 100%; }
 </style></head><body>
 <div class="login">
-  <h1>Invoice Importer</h1>
-  <p class="subtitle">Sign in to continue</p>
+  <div class="brand-lockup">
+    <img src="/static/a2z-aquariums-logo.png" alt="A2Z Aquariums logo"/>
+    <div>
+      <h1>Invoice Importer</h1>
+      <p class="subtitle">A2Z Aquariums</p>
+    </div>
+  </div>
   <div class="card">
     <form method="post" action="/login">
       <input type="password" name="password" placeholder="Password" autofocus required />
@@ -153,8 +167,13 @@ INDEX_HTML = """<!DOCTYPE html>
 </style></head><body>
 <div class="container">
 """ + _NAV.replace('id="nav-home">Upload<', 'id="nav-home" class="active">Upload<') + """
-  <h1>Upload an invoice</h1>
-  <p class="subtitle">Drop a PDF. We'll extract, match, and price it for review.</p>
+  <div class="brand-lockup">
+    <img src="/static/a2z-aquariums-logo.png" alt="A2Z Aquariums logo"/>
+    <div>
+      <h1>Upload an invoice</h1>
+      <p class="subtitle">Drop a PDF. We'll extract, match, and price it for review.</p>
+    </div>
+  </div>
   <label class="drop" id="drop">
     <input type="file" id="file" accept="application/pdf" />
     <p><strong>Drop a PDF here</strong> or click to select</p>
