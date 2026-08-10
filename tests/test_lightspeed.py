@@ -332,6 +332,7 @@ async def test_create_product_accepts_data_list_response(client_factory):
             "id": "prod-1",
             "name": "New Product",
             "sku": "SKU-1",
+            "has_inventory": True,
         }]})
 
     client = client_factory(handler)
@@ -368,6 +369,7 @@ async def test_create_product_fetches_product_when_response_is_id_string(client_
             return httpx.Response(200, json={"data": {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "name": "Fetched Product",
+                "has_inventory": True,
             }})
         return httpx.Response(404)
 
@@ -379,6 +381,44 @@ async def test_create_product_fetches_product_when_response_is_id_string(client_
         ("GET", "/api/2.0/products/123e4567-e89b-12d3-a456-426614174000"),
     ]
     assert product["name"] == "Fetched Product"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_product_enforces_inventory_tracking_after_create(client_factory):
+    calls: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}") if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.method == "POST" and request.url.path.endswith("/products"):
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "name": "New Product",
+                "has_inventory": False,
+            }})
+        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "name": "New Product",
+                "has_inventory": True,
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.create_product(name="New Product", has_inventory=True)
+
+    assert calls[0] == (
+        "POST",
+        "/api/2.0/products",
+        {"name": "New Product", "has_inventory": True},
+    )
+    assert calls[1] == (
+        "PUT",
+        "/api/2.0/products/prod-1",
+        {"has_inventory": True},
+    )
+    assert product["has_inventory"] is True
     await client.close()
 
 

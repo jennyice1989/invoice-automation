@@ -776,13 +776,44 @@ class LightspeedClient:
         # product dict, or on some accounts just the new product id string.
         inner = self._unwrap_product_response(data, context="product create")
         if isinstance(inner, dict):
-            return inner
+            return await self._ensure_product_inventory_tracking(
+                inner, requested=has_inventory,
+            )
         if _UUID_RE.match(inner.strip()):
-            return await self.get_product(inner.strip())
+            product = await self.get_product(inner.strip())
+            return await self._ensure_product_inventory_tracking(
+                product, requested=has_inventory,
+            )
         raise LightspeedError(
             "Unexpected Lightspeed response during product create: "
             f"string response {inner[:300]!r}"
         )
+
+    async def _ensure_product_inventory_tracking(
+        self,
+        product: dict,
+        *,
+        requested: bool,
+    ) -> dict:
+        """Make product creation defensive when create ignores has_inventory."""
+        if not requested or product.get("has_inventory") is True:
+            return product
+        product_id = product.get("id")
+        if not product_id:
+            return product
+        try:
+            updated = await self.update_product(product_id, has_inventory=True)
+            return updated or product
+        except LightspeedError as exc:
+            logger.warning(
+                "Product %s was created, but inventory tracking could not be "
+                "enabled: %s",
+                product_id,
+                exc,
+            )
+            out = dict(product)
+            out["_inventory_tracking_error"] = str(exc)
+            return out
 
     async def update_product(
         self,
