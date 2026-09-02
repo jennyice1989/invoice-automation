@@ -498,7 +498,10 @@ async def test_patch_product_price_sends_nested_prices_payload(client_factory):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PATCH" and request.url.path.endswith("/products/prod-1"):
+        if (
+            request.method == "PATCH"
+            and request.url.path == "/api/2026-10/products/prod-1"
+        ):
             captured["body"] = json.loads(request.content.decode())
             return httpx.Response(200, json={
                 "data": {

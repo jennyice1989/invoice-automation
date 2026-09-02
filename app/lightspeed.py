@@ -225,6 +225,7 @@ class LightspeedClient:
         if not domain_prefix or not personal_token:
             raise ValueError("domain_prefix and personal_token are required")
 
+        self.domain_prefix = domain_prefix
         self.base_url = f"https://{domain_prefix}.retail.lightspeed.app/api/2.0"
         self.personal_token = personal_token
         self.max_retries = max_retries
@@ -258,6 +259,7 @@ class LightspeedClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        api_version: str | None = None,
     ) -> Any:
         """
         Execute a request with retry on 429 / 5xx.
@@ -266,14 +268,18 @@ class LightspeedClient:
         returns 429 with a Retry-After header when you exceed it. We honor
         the header and back off exponentially on 5xx.
         """
-        url = f"{self.base_url}{path}"
+        if api_version:
+            url = (
+                f"https://{self.domain_prefix}.retail.lightspeed.app"
+                f"/api/{api_version}{path}"
+            )
+        else:
+            url = f"{self.base_url}{path}"
         last_exc: Exception | None = None
 
         for attempt in range(self.max_retries):
             try:
-                resp = await self._client.request(
-                    method, url, json=json, params=params
-                )
+                resp = await self._client.request(method, url, json=json, params=params)
             except httpx.RequestError as exc:
                 last_exc = exc
                 logger.warning("Network error on %s %s: %s", method, path, exc)
@@ -300,7 +306,8 @@ class LightspeedClient:
                 )
 
             if resp.status_code == 404:
-                raise LightspeedNotFoundError(f"Not found: {path}")
+                version = api_version or "2.0"
+                raise LightspeedNotFoundError(f"Not found: /api/{version}{path}")
 
             if not resp.is_success:
                 raise LightspeedError(
@@ -943,16 +950,12 @@ class LightspeedClient:
                 "price_excluding_tax": f"{float(retail_price):.2f}",
             }
         }
-        try:
-            data = await self._request(
-                "PATCH", f"/products/{product_id}", json=payload
-            )
-        except LightspeedNotFoundError:
-            logger.warning(
-                "Skipping price patch for product %s (404 — likely deleted)",
-                product_id,
-            )
-            return None
+        data = await self._request(
+            "PATCH",
+            f"/products/{product_id}",
+            json=payload,
+            api_version="2026-10",
+        )
         if not data:
             try:
                 return await self.get_product(product_id)
@@ -962,6 +965,13 @@ class LightspeedClient:
                 }}
         product = self._unwrap_product_response(data, context="product price patch")
         if isinstance(product, dict):
+            if set(product.keys()) <= {"id"}:
+                try:
+                    return await self.get_product(product_id)
+                except LightspeedError:
+                    return {"id": product_id, "_partial_update": {
+                        "price_excluding_tax": float(retail_price),
+                    }}
             return product
         if _UUID_RE.match(product.strip()):
             try:
