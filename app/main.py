@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Any, AsyncIterator
