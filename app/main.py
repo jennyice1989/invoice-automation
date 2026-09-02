@@ -11,7 +11,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Annotated, AsyncIterator
+from typing import Annotated, Any, AsyncIterator
 
 from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request,
@@ -65,7 +65,7 @@ from app.supplier_catalog import (
 )
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, API_COMMANDS_HTML,
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
@@ -223,6 +223,13 @@ async def admin_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
     return HTMLResponse(ADMIN_HTML)
+
+
+@app.get("/api-commands", response_class=HTMLResponse)
+async def api_commands_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(API_COMMANDS_HTML)
 
 
 @app.get("/enrich", response_class=HTMLResponse)
@@ -3046,6 +3053,362 @@ async def list_enrich_batches(session: AsyncSession = Depends(_session)):
 # --------------------------------------------------------------------- #
 # Direct API endpoints retained                                         #
 # --------------------------------------------------------------------- #
+
+class ApiCommandRequest(BaseModel):
+    command: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+def _api_command_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "app_health",
+            "label": "App health",
+            "description": "Check whether the app process is responding.",
+            "fields": [],
+        },
+        {
+            "id": "catalog_status",
+            "label": "Catalog cache status",
+            "description": "Show local catalog count and last sync time.",
+            "fields": [],
+        },
+        {
+            "id": "sync_catalog",
+            "label": "Sync Lightspeed catalog",
+            "description": "Refresh the local product cache from Lightspeed.",
+            "fields": [],
+        },
+        {
+            "id": "bulk_price_update",
+            "label": "Bulk price update by SKU",
+            "description": "Paste SKU/price pairs, preview matches, then run the approved updates.",
+            "fields": [
+                {
+                    "name": "updates_text",
+                    "label": "SKU / price updates",
+                    "type": "textarea",
+                    "required": True,
+                    "placeholder": "\"11468\": 29.99,\\n11469,45.99\\n11479: 24.99",
+                },
+                {
+                    "name": "dry_run",
+                    "label": "Preview only",
+                    "type": "checkbox",
+                    "checked": True,
+                },
+            ],
+        },
+        {
+            "id": "debug_sku",
+            "label": "Debug SKU lookup",
+            "description": "Search Lightspeed for an exact SKU.",
+            "fields": [{"name": "sku", "label": "SKU", "required": True}],
+        },
+        {
+            "id": "debug_barcode",
+            "label": "Debug barcode/UPC lookup",
+            "description": "Search Lightspeed by barcode/UPC and by SKU fallback.",
+            "fields": [{"name": "barcode", "label": "Barcode / UPC", "required": True}],
+        },
+        {
+            "id": "search_products",
+            "label": "Search products",
+            "description": "Search live Lightspeed products by name, SKU, supplier code, or UPC.",
+            "fields": [
+                {"name": "query", "label": "Search text", "required": True},
+                {"name": "limit", "label": "Limit", "type": "number", "placeholder": "20"},
+            ],
+        },
+        {
+            "id": "get_product",
+            "label": "Get product by ID",
+            "description": "Fetch one product from Lightspeed.",
+            "fields": [{"name": "product_id", "label": "Lightspeed product ID", "required": True}],
+        },
+        {
+            "id": "list_outlets",
+            "label": "List outlets",
+            "description": "Return Lightspeed outlets.",
+            "fields": [],
+        },
+        {
+            "id": "search_suppliers",
+            "label": "Search suppliers",
+            "description": "Search Lightspeed suppliers by name.",
+            "fields": [{"name": "query", "label": "Supplier name", "required": True}],
+        },
+        {
+            "id": "get_consignment",
+            "label": "Get consignment",
+            "description": "Fetch one consignment by ID.",
+            "fields": [{"name": "consignment_id", "label": "Consignment ID", "required": True}],
+        },
+        {
+            "id": "lightspeed_get",
+            "label": "Raw Lightspeed GET",
+            "description": "GET a whitelisted Lightspeed path such as /products, /search, /suppliers, /outlets, or /consignments.",
+            "fields": [
+                {"name": "path", "label": "Path", "required": True, "placeholder": "/products"},
+                {"name": "params_json", "label": "Params JSON", "placeholder": "{\"page_size\": 5}"},
+            ],
+        },
+    ]
+
+
+def _arg(args: dict[str, Any], key: str) -> str:
+    return str(args.get(key) or "").strip()
+
+
+def _bool_arg(args: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = args.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_arg(
+    args: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(args.get(key) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _parse_price_update_lines(text: str) -> tuple[dict[str, float], list[str]]:
+    updates: dict[str, float] = {}
+    errors: list[str] = []
+    text = (text or "").strip()
+    if not text:
+        return updates, ["Paste at least one SKU and price"]
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            for sku, price in parsed.items():
+                sku_text = str(sku).strip()
+                try:
+                    price_float = float(price)
+                except (TypeError, ValueError):
+                    errors.append(f"{sku_text}: invalid price {price!r}")
+                    continue
+                if sku_text and price_float > 0:
+                    updates[sku_text] = price_float
+                else:
+                    errors.append(f"{sku_text or '(blank SKU)'}: price must be above 0")
+            return updates, errors
+    except json.JSONDecodeError:
+        pass
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip().rstrip(",")
+        if not line or line in {"{", "}"}:
+            continue
+        if line.endswith("{") and "=" in line:
+            continue
+        match = re.match(
+            r"""^["']?(?P<sku>[^"',:\s]+)["']?\s*[:,]\s*\$?(?P<price>\d+(?:\.\d{1,2})?)$""",
+            line,
+        )
+        if not match:
+            errors.append(f"Line {line_number}: expected SKU,price or \"SKU\": price")
+            continue
+        sku = match.group("sku").strip()
+        price = float(match.group("price"))
+        if price <= 0:
+            errors.append(f"Line {line_number}: price must be above 0")
+            continue
+        updates[sku] = price
+    return updates, errors
+
+
+def _product_retail_price(product: dict | None) -> float | None:
+    if not product:
+        return None
+    value = product.get("price_excluding_tax")
+    if value is None and isinstance(product.get("prices"), dict):
+        value = product["prices"].get("price_excluding_tax")
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.get("/api-commands/commands", dependencies=[Depends(require_auth)])
+async def list_api_commands():
+    return {"data": _api_command_definitions()}
+
+
+@app.post("/api-commands/run", dependencies=[Depends(require_auth)])
+async def run_api_command(
+    body: ApiCommandRequest,
+    session: AsyncSession = Depends(_session),
+):
+    command = body.command.strip()
+    args = body.args or {}
+
+    if command == "app_health":
+        return {"ok": True, "command": command, "result": {"status": "ok"}}
+    if command == "catalog_status":
+        return {"ok": True, "command": command, "result": await catalog_status(session)}
+    if command == "sync_catalog":
+        try:
+            result = await sync_lightspeed_catalog(session, _client())
+        except LightspeedError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {
+            "ok": True,
+            "command": command,
+            "result": {
+                "total": result.total,
+                "upserted": result.upserted,
+                "deactivated": result.deactivated,
+                "synced_at": result.synced_at.isoformat(),
+            },
+        }
+
+    client = _client()
+    if command == "bulk_price_update":
+        updates, parse_errors = _parse_price_update_lines(_arg(args, "updates_text"))
+        dry_run = _bool_arg(args, "dry_run", True)
+        if not updates:
+            raise HTTPException(400, "; ".join(parse_errors) or "No valid price updates")
+        if len(updates) > 100:
+            raise HTTPException(400, "Limit bulk price updates to 100 SKUs at a time")
+
+        results = []
+        for sku, new_price in updates.items():
+            try:
+                product = await client.find_product_by_sku(sku)
+                if not product:
+                    results.append({
+                        "ok": False,
+                        "sku": sku,
+                        "new_price": new_price,
+                        "error": "SKU not found",
+                    })
+                    continue
+                product_id = product.get("id")
+                if not product_id:
+                    results.append({
+                        "ok": False,
+                        "sku": sku,
+                        "new_price": new_price,
+                        "error": "Lightspeed product response did not include an id",
+                    })
+                    continue
+                current_price = _product_retail_price(product)
+                name = product.get("variant_name") or product.get("name") or "Unknown Product"
+                changed = current_price is None or abs(current_price - new_price) >= 0.005
+                item = {
+                    "ok": True,
+                    "sku": sku,
+                    "product_id": product_id,
+                    "name": name,
+                    "current_price": current_price,
+                    "new_price": new_price,
+                    "changed": changed,
+                    "dry_run": dry_run,
+                }
+                if not dry_run and changed:
+                    updated = await client.update_product(product_id, retail_price=new_price)
+                    if not updated:
+                        item.update({"ok": False, "error": "Lightspeed could not update product"})
+                    else:
+                        await upsert_cached_product(session, updated)
+                        item["updated"] = True
+                results.append(item)
+            except LightspeedError as exc:
+                results.append({
+                    "ok": False,
+                    "sku": sku,
+                    "new_price": new_price,
+                    "error": str(exc),
+                })
+
+        return {
+            "ok": True,
+            "command": command,
+            "dry_run": dry_run,
+            "parse_errors": parse_errors,
+            "requested": len(updates),
+            "succeeded": sum(1 for item in results if item.get("ok")),
+            "failed": sum(1 for item in results if not item.get("ok")),
+            "updated": sum(1 for item in results if item.get("updated")),
+            "results": results,
+        }
+    if command == "debug_sku":
+        sku = _arg(args, "sku")
+        if not sku:
+            raise HTTPException(400, "SKU is required")
+        return {"ok": True, "command": command, "result": await client.find_product_by_sku(sku)}
+    if command == "debug_barcode":
+        barcode = _arg(args, "barcode")
+        if not barcode:
+            raise HTTPException(400, "Barcode / UPC is required")
+        return {
+            "ok": True,
+            "command": command,
+            "result": {
+                "find_product_by_barcode": await client.find_product_by_barcode(barcode),
+                "find_product_by_sku": await client.find_product_by_sku(barcode),
+            },
+        }
+    if command == "search_products":
+        query = _arg(args, "query")
+        if not query:
+            raise HTTPException(400, "Search text is required")
+        limit = _int_arg(args, "limit", 20, minimum=1, maximum=50)
+        return {"ok": True, "command": command, "result": await client.search_products(query, limit=limit)}
+    if command == "get_product":
+        product_id = _arg(args, "product_id")
+        if not product_id:
+            raise HTTPException(400, "Product ID is required")
+        return {"ok": True, "command": command, "result": await client.get_product(product_id)}
+    if command == "list_outlets":
+        return {"ok": True, "command": command, "result": await client.list_outlets()}
+    if command == "search_suppliers":
+        query = _arg(args, "query")
+        if not query:
+            raise HTTPException(400, "Supplier name is required")
+        return {"ok": True, "command": command, "result": await client.search_suppliers(query)}
+    if command == "get_consignment":
+        consignment_id = _arg(args, "consignment_id")
+        if not consignment_id:
+            raise HTTPException(400, "Consignment ID is required")
+        return {"ok": True, "command": command, "result": await client.get_consignment(consignment_id)}
+    if command == "lightspeed_get":
+        path = _arg(args, "path")
+        if not path.startswith("/"):
+            path = f"/{path}"
+        allowed = ("/products", "/search", "/suppliers", "/outlets", "/consignments")
+        if not any(path == prefix or path.startswith(f"{prefix}/") for prefix in allowed):
+            raise HTTPException(400, "Path is not allowed for the API console")
+        params: dict[str, Any] = {}
+        params_json = _arg(args, "params_json")
+        if params_json:
+            try:
+                parsed = json.loads(params_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(400, f"Params JSON is invalid: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise HTTPException(400, "Params JSON must be an object")
+            params = parsed
+        try:
+            result = await client._request("GET", path, params=params)
+        except LightspeedError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"ok": True, "command": command, "result": result}
+
+    raise HTTPException(400, f"Unknown API command: {command}")
+
 
 @app.get("/debug/sku", dependencies=[Depends(require_auth)])
 async def debug_sku(sku: str):

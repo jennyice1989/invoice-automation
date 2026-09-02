@@ -102,6 +102,7 @@ _NAV = """<nav>
 <a href="/audit" id="nav-audit">Catalog audit</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
+<a href="/api-commands" id="nav-api">API</a>
 <a href="/admin" id="nav-admin">Admin</a>
 <span class="grow"></span>
 <form action="/logout" method="post"><button class="logout" type="submit">Sign out</button></form>
@@ -1506,6 +1507,133 @@ function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => 
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 loadRules(); loadSuppliers();
+</script>
+</body></html>"""
+
+
+API_COMMANDS_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>API commands</title>
+<style>""" + _COMMON_CSS + """
+.api-grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.command-list { display: flex; flex-direction: column; gap: 8px; }
+.command-btn { text-align: left; background: white; border: 1px solid var(--border);
+               border-radius: 6px; padding: 10px 12px; cursor: pointer; }
+.command-btn:hover, .command-btn.active { border-color: var(--accent); background: var(--accent-soft); }
+.command-btn strong { display: block; }
+.command-btn small { display: block; color: var(--muted); margin-top: 2px; }
+.field { margin-bottom: 12px; }
+.field label { display: block; color: var(--muted); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.field textarea { width: 100%; min-height: 180px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+                  padding: 10px; border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
+.check-field { display: inline-flex; gap: 8px; align-items: center; color: var(--fg); font-size: 13px; }
+pre.output { background: #1c1917; color: #fafaf9; border-radius: 8px; padding: 14px;
+             overflow: auto; min-height: 260px; font-size: 12px; line-height: 1.45; }
+@media (max-width: 820px) { .api-grid { grid-template-columns: 1fr; } }
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-api">API<', 'id="nav-api" class="active">API<') + """
+  <h1>API commands</h1>
+  <p class="subtitle">Run safe, whitelisted app and Lightspeed API commands for troubleshooting and approved updates.</p>
+
+  <div class="api-grid">
+    <div class="card">
+      <h2>Commands</h2>
+      <div id="commands" class="command-list">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2 id="title">Select a command</h2>
+      <p class="subtitle" id="desc"></p>
+      <form id="form" onsubmit="runCommand(event)">
+        <div id="fields"></div>
+        <button class="primary" id="runBtn" type="submit">Run command</button>
+      </form>
+      <pre class="output" id="output">No command run yet.</pre>
+    </div>
+  </div>
+</div>
+<script>
+let COMMANDS = [];
+let SELECTED = null;
+
+async function loadCommands() {
+  const resp = await fetch('/api-commands/commands');
+  const data = await resp.json();
+  COMMANDS = data.data || [];
+  document.getElementById('commands').innerHTML = COMMANDS.map(c =>
+    '<button type="button" class="command-btn" id="cmd-' + escape(c.id) + '" onclick="selectCommand(\\'' + escape(c.id) + '\\')">'
+    + '<strong>' + escape(c.label) + '</strong><small>' + escape(c.description) + '</small></button>'
+  ).join('');
+  if (COMMANDS.length) selectCommand(COMMANDS[0].id);
+}
+
+function fieldHtml(f) {
+  const id = 'arg-' + f.name;
+  if (f.type === 'textarea') {
+    return '<div class="field"><label for="' + escape(id) + '">' + escape(f.label || f.name) + '</label>'
+      + '<textarea id="' + escape(id) + '" ' + (f.required ? 'required ' : '')
+      + 'placeholder="' + escape(f.placeholder || '') + '"></textarea></div>';
+  }
+  if (f.type === 'checkbox') {
+    return '<div class="field"><label class="check-field">'
+      + '<input id="' + escape(id) + '" type="checkbox" ' + (f.checked ? 'checked ' : '') + '/>'
+      + escape(f.label || f.name) + '</label></div>';
+  }
+  return '<div class="field"><label for="' + escape(id) + '">' + escape(f.label || f.name) + '</label>'
+    + '<input id="' + escape(id) + '" type="' + escape(f.type || 'text') + '" '
+    + (f.required ? 'required ' : '')
+    + 'placeholder="' + escape(f.placeholder || '') + '" /></div>';
+}
+
+function selectCommand(id) {
+  SELECTED = COMMANDS.find(c => c.id === id);
+  if (!SELECTED) return;
+  document.querySelectorAll('.command-btn').forEach(btn => btn.classList.remove('active'));
+  const btn = document.getElementById('cmd-' + id);
+  if (btn) btn.classList.add('active');
+  document.getElementById('title').textContent = SELECTED.label;
+  document.getElementById('desc').textContent = SELECTED.description || '';
+  document.getElementById('fields').innerHTML = (SELECTED.fields || []).map(fieldHtml).join('');
+  document.getElementById('output').textContent = SELECTED.id === 'bulk_price_update'
+    ? 'Paste SKU/price pairs, leave Preview only checked, and run once to confirm matches before updating.'
+    : 'No command run yet.';
+}
+
+async function runCommand(event) {
+  event.preventDefault();
+  if (!SELECTED) return;
+  const args = {};
+  for (const f of SELECTED.fields || []) {
+    const el = document.getElementById('arg-' + f.name);
+    args[f.name] = f.type === 'checkbox' ? !!(el && el.checked) : ((el || {}).value || '');
+  }
+  if (SELECTED.id === 'bulk_price_update' && args.dry_run === false) {
+    if (!confirm('Run these price updates in Lightspeed now?')) return;
+  }
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  document.getElementById('output').textContent = 'Running...';
+  try {
+    const resp = await fetch('/api-commands/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: SELECTED.id, args}),
+    });
+    const data = await resp.json();
+    document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    document.getElementById('output').textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+loadCommands();
 </script>
 </body></html>"""
 
