@@ -3319,11 +3319,12 @@ async def run_api_command(
                     "dry_run": dry_run,
                 }
                 if not dry_run and changed:
-                    updated = await client.update_product(product_id, retail_price=new_price)
+                    updated = await client.patch_product_price(product_id, new_price)
                     if not updated:
                         item.update({"ok": False, "error": "Lightspeed could not update product"})
                     else:
                         await upsert_cached_product(session, updated)
+                        item["method"] = "PATCH prices.price_excluding_tax"
                         item["updated"] = True
                 results.append(item)
             except LightspeedError as exc:

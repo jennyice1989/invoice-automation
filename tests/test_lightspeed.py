@@ -494,6 +494,32 @@ async def test_update_product_sends_sku_and_barcode(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_patch_product_price_sends_nested_prices_payload(client_factory):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH" and request.url.path.endswith("/products/prod-1"):
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={
+                "data": {
+                    "id": "prod-1",
+                    "sku": "11468",
+                    "prices": {"price_excluding_tax": "29.99"},
+                },
+            })
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.patch_product_price("prod-1", 29.99)
+
+    assert captured["body"] == {
+        "prices": {"price_excluding_tax": "29.99"},
+    }
+    assert product["id"] == "prod-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_update_product_can_enable_inventory_tracking(client_factory):
     captured: dict = {}
 

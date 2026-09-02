@@ -932,6 +932,51 @@ class LightspeedClient:
         except LightspeedError:
             return {"id": product_id, "_partial_update": payload}
 
+    async def patch_product_price(
+        self,
+        product_id: str,
+        retail_price: float,
+    ) -> dict | None:
+        """Update product retail price using the nested X-Series price shape."""
+        payload = {
+            "prices": {
+                "price_excluding_tax": f"{float(retail_price):.2f}",
+            }
+        }
+        try:
+            data = await self._request(
+                "PATCH", f"/products/{product_id}", json=payload
+            )
+        except LightspeedNotFoundError:
+            logger.warning(
+                "Skipping price patch for product %s (404 — likely deleted)",
+                product_id,
+            )
+            return None
+        if not data:
+            try:
+                return await self.get_product(product_id)
+            except LightspeedError:
+                return {"id": product_id, "_partial_update": {
+                    "price_excluding_tax": float(retail_price),
+                }}
+        product = self._unwrap_product_response(data, context="product price patch")
+        if isinstance(product, dict):
+            return product
+        if _UUID_RE.match(product.strip()):
+            try:
+                return await self.get_product(product.strip())
+            except LightspeedError:
+                return {"id": product_id, "_partial_update": {
+                    "price_excluding_tax": float(retail_price),
+                }}
+        try:
+            return await self.get_product(product_id)
+        except LightspeedError:
+            return {"id": product_id, "_partial_update": {
+                "price_excluding_tax": float(retail_price),
+            }}
+
     async def upload_product_image(
         self,
         product_id: str,
