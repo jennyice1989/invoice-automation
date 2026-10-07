@@ -1693,6 +1693,7 @@ FISH_LABELS_HTML = """<!DOCTYPE html>
     <div id="queueBox" class="muted">No fish labels queued yet.</div>
     <div class="toolbar">
       <button class="secondary" onclick="previewPrices()">Recheck prices</button>
+      <button class="secondary" onclick="checkMarketPrices()">Check market prices</button>
       <button class="primary" onclick="downloadPdf(false)">Download PDF</button>
       <button class="secondary" onclick="clearQueue()">Clear queue</button>
     </div>
@@ -1867,6 +1868,22 @@ async function previewPrices() {
   }
 }
 
+async function checkMarketPrices() {
+  const out = document.getElementById('reviewBox');
+  if (!QUEUE.length) { alert('Add at least one fish label.'); return; }
+  out.innerHTML = '<span class="spinner"></span>Checking current market prices...';
+  try {
+    const data = await api('/fish-labels/market-check', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload()),
+    });
+    out.innerHTML = marketHtml(data.data || []);
+  } catch (err) {
+    out.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
 async function downloadPdf(force) {
   if (!QUEUE.length) { alert('Add at least one fish label.'); return; }
   if (force) ACCEPT_PRICE_CHANGES = true;
@@ -1895,6 +1912,40 @@ async function downloadPdf(force) {
     const detailItems = err.detail && err.detail.items ? reviewHtml(err.detail.items, []) : '';
     document.getElementById('reviewBox').innerHTML = '<div class="error">' + escape(err.message) + '</div>' + detailItems;
   }
+}
+
+function marketHtml(items) {
+  if (!items.length) return '<span class="muted">No market check rows.</span>';
+  let h = '<table><thead><tr><th>Fish</th><th>Your price</th><th>Market</th><th>Status</th><th>Offers</th></tr></thead><tbody>';
+  items.forEach(r => {
+    const offers = (r.offers || []).map(o =>
+      escape(o.seller || '') + ' ' + money(o.price)
+    ).join('<br>');
+    h += '<tr><td><strong>' + escape(r.display_name || '') + '</strong><br><small>Query: ' + escape(r.query || '') + '</small><br><small>Fetched ' + escape(r.fetched_at ? new Date(r.fetched_at).toLocaleString() : '') + '</small></td>'
+      + '<td>' + money(r.live_price) + '</td>'
+      + '<td>' + (r.market_price == null ? 'No market data' : '<strong>' + money(r.market_price) + '</strong><br><small>Range ' + money(r.market_low) + ' - ' + money(r.market_high) + '</small>') + '</td>'
+      + '<td>' + marketStatus(r.status, r.error) + '<br><small>' + escape(r.provider || '') + (r.raw_count != null ? ' raw results: ' + r.raw_count : '') + '</small></td>'
+      + '<td><small>' + (offers || 'No first-party non-sale offers found') + '</small></td></tr>';
+  });
+  h += '</tbody></table>';
+  return h;
+}
+
+function marketStatus(status, error) {
+  if (error) return '<span class="bad-text">' + escape(error) + '</span>';
+  const labels = {
+    aligned: 'Aligned',
+    below_market: 'Below market',
+    above_market: 'Above market',
+    no_market_data: 'No market data',
+    missing_store_price: 'Missing store price',
+    lightspeed_unavailable: 'Lightspeed unavailable',
+    market_check_failed: 'Market check failed',
+    missing_query: 'Missing search query',
+  };
+  const text = labels[status] || status || '';
+  const cls = status === 'aligned' ? 'success' : 'warn';
+  return '<span class="' + cls + '">' + escape(text) + '</span>';
 }
 
 function reviewHtml(items, changes) {

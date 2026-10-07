@@ -79,9 +79,11 @@ until you approve the specific action.
 fish name, variety, sex, size, or SKU. Select the exact product yourself,
 adjust the display name or quantity, optionally enter a manual override, then
 download a DYMO 30334 PDF. The app rechecks Lightspeed before PDF generation
-and shows any price changes for review. Manual labels are allowed but marked as
-not verified against Lightspeed. Label generation does not write to Lightspeed,
-change inventory, or update prices.
+and shows any price changes for review. You can also run a market price check
+that compares the live Lightspeed price against first-party, non-sale shopping
+offers from the configured pricing provider. Manual labels are allowed but
+marked as not verified against Lightspeed. Label generation does not write to
+Lightspeed, change inventory, or update prices.
 
 **Subsequent invoices from the same supplier** auto-match against everything
 you've taught it. The unknown rate trends toward zero.
@@ -151,6 +153,7 @@ All require authentication via the session cookie except `/healthz`.
 - `GET /products/search?q=...` — search Lightspeed catalog for manual picks
 - `GET /fish-labels/search?q=...` — live Lightspeed fish-product search
 - `POST /fish-labels/preview` — recheck selected fish prices before printing
+- `POST /fish-labels/market-check` — compare label prices against current market offers
 - `POST /fish-labels/pdf` — generate DYMO 30334 fish label PDF
 - `GET /audit/products` — audit existing products from the local catalog cache
 - `POST /audit/sync` — refresh catalog cache before audit review

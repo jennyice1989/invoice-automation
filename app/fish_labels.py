@@ -92,6 +92,35 @@ def label_price(live_price: float | None, recommended_price: float | None, manua
     return max(candidates), "higher_of_live_and_recommended" if recommended_price is not None else "live"
 
 
+def median_market_price(prices: list[float]) -> float | None:
+    valid = sorted(float(p) for p in prices if isinstance(p, (int, float)) and p > 0)
+    if not valid:
+        return None
+    mid = len(valid) // 2
+    if len(valid) % 2:
+        return round(valid[mid], 2)
+    return round((valid[mid - 1] + valid[mid]) / 2, 2)
+
+
+def market_alignment_status(
+    store_price: float | None,
+    market_price: float | None,
+    *,
+    tolerance: float = 0.10,
+) -> str:
+    if store_price is None or store_price <= 0:
+        return "missing_store_price"
+    if market_price is None or market_price <= 0:
+        return "no_market_data"
+    low = market_price * (1 - tolerance)
+    high = market_price * (1 + tolerance)
+    if store_price < low:
+        return "below_market"
+    if store_price > high:
+        return "above_market"
+    return "aligned"
+
+
 @dataclass
 class FishLabel:
     name: str

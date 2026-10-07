@@ -52,7 +52,8 @@ from app.enrichment import (
 from app.extraction import ExtractionError, extract_invoice_from_pdf
 from app.fish_labels import (
     FishLabel, fetched_at_iso, generate_fish_label_pdf, label_price,
-    printable_fish_name, product_variant_text, regular_retail_price, to_price,
+    market_alignment_status, median_market_price, printable_fish_name,
+    product_variant_text, regular_retail_price, to_price,
 )
 from app.lightspeed import (
     LightspeedAuthError, LightspeedClient, LightspeedError,
@@ -61,6 +62,7 @@ from app.lightspeed import (
 from app.matching import MatchingService, RawInvoiceLine
 from app.price_updates import float_or_none, retail_update_decision
 from app.pricing import PricingResult, price_line
+from app.retail_pricing import fetch_market_prices
 from app.supplier_catalog import (
     extract_pdf_text,
     find_supplier_catalog_item,
@@ -2276,6 +2278,81 @@ async def _review_fish_label_items(body: FishLabelPreviewRequest) -> dict:
     return {"items": reviewed, "changes": changes, "labels": labels}
 
 
+async def _market_check_fish_label_items(body: FishLabelPreviewRequest) -> list[dict]:
+    if not body.items:
+        raise HTTPException(400, "Add at least one fish label")
+    client = _client()
+    rows: list[dict] = []
+    for idx, item in enumerate(body.items):
+        product = None
+        live_price = None
+        display_name = (item.display_name or "").strip()
+        error = None
+        if item.product_id:
+            try:
+                product = await client.get_product(item.product_id)
+                live_price = regular_retail_price(product)
+                display_name = display_name or printable_fish_name(product.get("name"))
+            except LightspeedError as exc:
+                error = f"Lightspeed price check failed: {exc}"
+        else:
+            live_price = to_price(item.manual_price)
+
+        query = printable_fish_name(display_name or (product or {}).get("name"))
+        if not query:
+            rows.append({
+                "index": idx,
+                "product_id": item.product_id,
+                "display_name": display_name,
+                "status": "missing_query",
+                "error": error or "Enter a fish name before checking market prices",
+            })
+            continue
+
+        try:
+            market = await fetch_market_prices(query)
+        except Exception as exc:
+            logger.info("Market price check failed for %r: %s", query, exc)
+            rows.append({
+                "index": idx,
+                "product_id": item.product_id,
+                "display_name": display_name or query,
+                "query": query,
+                "live_price": live_price,
+                "status": "market_check_failed",
+                "error": str(exc),
+            })
+            continue
+
+        prices = [offer.price for offer in market.offers]
+        median_price = median_market_price(prices)
+        rows.append({
+            "index": idx,
+            "product_id": item.product_id,
+            "display_name": display_name or query,
+            "query": query,
+            "live_price": live_price,
+            "market_price": median_price,
+            "market_low": min(prices) if prices else None,
+            "market_high": max(prices) if prices else None,
+            "status": error and "lightspeed_unavailable" or market_alignment_status(live_price, median_price),
+            "error": error,
+            "provider": market.provider,
+            "raw_count": market.raw_count,
+            "fetched_at": fetched_at_iso(),
+            "offers": [
+                {
+                    "seller": offer.seller,
+                    "title": offer.title,
+                    "price": offer.price,
+                    "url": offer.url,
+                }
+                for offer in market.offers[:5]
+            ],
+        })
+    return rows
+
+
 @app.get("/fish-labels/search", dependencies=[Depends(require_auth)])
 async def search_fish_labels(q: str):
     q = (q or "").strip()
@@ -2296,6 +2373,11 @@ async def preview_fish_labels(body: FishLabelPreviewRequest):
         "data": result["items"],
         "changes": result["changes"],
     }
+
+
+@app.post("/fish-labels/market-check", dependencies=[Depends(require_auth)])
+async def market_check_fish_labels(body: FishLabelPreviewRequest):
+    return {"data": await _market_check_fish_label_items(body)}
 
 
 @app.post("/fish-labels/pdf", dependencies=[Depends(require_auth)])

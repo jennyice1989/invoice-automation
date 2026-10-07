@@ -11,16 +11,20 @@ from app.fish_labels import (
     LABEL_WIDTH,
     generate_fish_label_pdf,
     label_price,
+    market_alignment_status,
+    median_market_price,
     printable_fish_name,
     regular_retail_price,
 )
 from app.main import (
     FishLabelItemIn,
     FishLabelPreviewRequest,
+    _market_check_fish_label_items,
     _review_fish_label_items,
     search_fish_labels,
 )
 from app.lightspeed import LightspeedError
+from app.retail_pricing import MarketPriceResult, RetailOffer
 
 
 def test_printable_fish_name_removes_sizes_but_keeps_sex_and_variety():
@@ -44,6 +48,16 @@ def test_label_price_preserves_higher_existing_price_and_allows_lower_override()
     assert label_price(19.99, 14.99, None) == (19.99, "higher_of_live_and_recommended")
     assert label_price(19.99, 24.99, None) == (24.99, "higher_of_live_and_recommended")
     assert label_price(19.99, 24.99, 15.99) == (15.99, "manual_override")
+
+
+def test_market_alignment_status_uses_median_with_tolerance():
+    assert median_market_price([24.99, 19.99, 21.99]) == 21.99
+    assert median_market_price([19.99, 21.99]) == 20.99
+    assert market_alignment_status(21.99, 21.99) == "aligned"
+    assert market_alignment_status(17.99, 21.99) == "below_market"
+    assert market_alignment_status(27.99, 21.99) == "above_market"
+    assert market_alignment_status(None, 21.99) == "missing_store_price"
+    assert market_alignment_status(21.99, None) == "no_market_data"
 
 
 def test_pdf_dimensions_label_count_and_prices():
@@ -143,3 +157,38 @@ async def test_preview_reports_missing_manual_price_and_api_failures(monkeypatch
     ]))
     assert "Enter a price" in result["items"][0]["errors"][0]
     assert "Lightspeed price check failed" in result["items"][1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_market_check_compares_live_price_to_first_party_offers(monkeypatch):
+    class FakeClient:
+        async def get_product(self, product_id):
+            return {
+                "id": product_id,
+                "name": "Blue Mosaic Guppy Male Medium",
+                "price_excluding_tax": "19.99",
+            }
+
+    async def fake_fetch_market_prices(query):
+        assert query == "Blue Mosaic Guppy Male"
+        return MarketPriceResult(
+            provider="serpapi",
+            query=query,
+            raw_count=3,
+            offers=[
+                RetailOffer("Aquatic Retailer", "Blue Mosaic Guppy Male", 21.99),
+                RetailOffer("Fish Store", "Blue Mosaic Guppy", 24.99),
+                RetailOffer("Local Aquatics", "Guppy Male", 19.99),
+            ],
+        )
+
+    monkeypatch.setattr("app.main._client", lambda: FakeClient())
+    monkeypatch.setattr("app.main.fetch_market_prices", fake_fetch_market_prices)
+    result = await _market_check_fish_label_items(FishLabelPreviewRequest(items=[
+        FishLabelItemIn(product_id="fish-1", display_name="Blue Mosaic Guppy Male Medium")
+    ]))
+    assert result[0]["market_price"] == 21.99
+    assert result[0]["market_low"] == 19.99
+    assert result[0]["market_high"] == 24.99
+    assert result[0]["status"] == "aligned"
+    assert result[0]["offers"][0]["seller"] == "Aquatic Retailer"
