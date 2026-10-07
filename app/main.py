@@ -66,7 +66,8 @@ from app.supplier_catalog import (
 )
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, API_COMMANDS_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, BARCODES_HTML,
+    API_COMMANDS_HTML,
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
@@ -245,6 +246,13 @@ async def audit_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
     return HTMLResponse(AUDIT_HTML)
+
+
+@app.get("/barcodes", response_class=HTMLResponse)
+async def barcodes_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(BARCODES_HTML)
 
 
 @app.get("/enrich/review/{batch_id}", response_class=HTMLResponse)

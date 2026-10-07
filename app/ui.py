@@ -100,6 +100,7 @@ _NAV = """<nav>
 <a href="/" id="nav-home">Upload</a>
 <a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/audit" id="nav-audit">Catalog audit</a>
+<a href="/barcodes" id="nav-barcodes">Barcodes</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
 <a href="/api-commands" id="nav-api">API</a>
@@ -1634,6 +1635,86 @@ function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => 
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 loadCommands();
+</script>
+</body></html>"""
+
+
+BARCODES_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Barcode creation</title>
+<style>""" + _COMMON_CSS + """
+.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.toolbar input { max-width:360px; }
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-barcodes">Barcodes<', 'id="nav-barcodes" class="active">Barcodes<') + """
+  <h1>Barcode creation</h1>
+  <p class="subtitle">Find products using generated/internal SKUs, then replace them with the real barcode used as the SKU.</p>
+
+  <div class="card">
+    <h2>Products needing barcode/SKU</h2>
+    <div class="toolbar">
+      <input id="generatedSkuQ" type="text" placeholder="Search product, generated SKU, supplier code" onkeydown="if(event.key==='Enter') loadGeneratedSkus()" />
+      <button class="secondary" onclick="loadGeneratedSkus()">Search</button>
+      <a class="secondary" href="/admin/generated-skus.csv">Export CSV</a>
+    </div>
+    <div id="generatedSkuBox" class="muted">Loading...</div>
+  </div>
+</div>
+<script>
+async function api(url, opts) {
+  const resp = await fetch(url, opts || {});
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+async function loadGeneratedSkus() {
+  const q = document.getElementById('generatedSkuQ').value.trim();
+  const box = document.getElementById('generatedSkuBox');
+  box.innerHTML = '<span class="spinner"></span>Loading...';
+  try {
+    const data = await api('/admin/generated-skus?q=' + encodeURIComponent(q));
+    if (!data.data.length) {
+      box.innerHTML = '<span class="muted">No products need barcode/SKU cleanup.</span>';
+      return;
+    }
+    let h = '<table><thead><tr><th>Product</th><th>Current SKU</th><th>Current barcode</th><th>Real barcode/SKU</th><th></th></tr></thead><tbody>';
+    data.data.forEach(r => {
+      h += '<tr><td><strong>' + escape(r.name || '') + '</strong><br><small>'
+        + escape(r.brand_name || '') + ' ' + escape(r.category_name || '') + '</small><br><small>'
+        + escape(r.id || '') + '</small></td>'
+        + '<td>' + escape(r.sku || '') + '</td>'
+        + '<td>' + escape(r.barcode || '') + '</td>'
+        + '<td><input id="real-sku-' + escAttr(r.id) + '" type="text" placeholder="Scan or type barcode" /></td>'
+        + '<td><button class="primary" onclick="updateGeneratedSku(\\'' + escAttr(r.id) + '\\')">Update</button></td></tr>';
+    });
+    h += '</tbody></table>';
+    box.innerHTML = h;
+  } catch (err) {
+    box.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+async function updateGeneratedSku(id) {
+  const input = document.getElementById('real-sku-' + id);
+  const sku = (input ? input.value : '').trim();
+  if (!sku) { alert('Enter the real barcode/SKU.'); return; }
+  await api('/admin/generated-skus/' + encodeURIComponent(id) + '/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ sku }),
+  });
+  loadGeneratedSkus();
+}
+
+function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+function escAttr(s) { return escape(s); }
+
+loadGeneratedSkus();
 </script>
 </body></html>"""
 
