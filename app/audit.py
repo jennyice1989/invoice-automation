@@ -172,7 +172,7 @@ def audit_product(product: CatalogProduct) -> dict[str, Any]:
         ))
     elif is_generated_sku(product.sku, effective_barcode):
         issues.append(AuditIssue(
-            "generated_sku", "Generated/internal SKU", "medium",
+            "generated_sku", "Missing barcode/SKU", "medium",
         ))
     if not product.brand_name:
         issues.append(AuditIssue(

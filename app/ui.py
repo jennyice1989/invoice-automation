@@ -359,8 +359,8 @@ AUDIT_HTML = """<!DOCTYPE html>
       <option value="inventory_tracking_off">Inventory tracking off</option>
       <option value="missing_barcode">Missing barcode</option>
       <option value="missing_sku">Missing SKU</option>
-      <option value="generated_sku">Generated/internal SKU</option>
-      <option value="missing_barcode_sku">Missing both barcode/SKU</option>
+      <option value="generated_sku">Missing barcode/SKU</option>
+      <option value="missing_barcode_sku">Both barcode and SKU blank</option>
       <option value="missing_brand">Missing brand</option>
       <option value="missing_category">Missing category</option>
     </select>
@@ -433,8 +433,8 @@ function renderSummary(s, shown, issue) {
     ['Tracking off', s.inventory_tracking_off || 0],
     ['Missing barcodes', s.missing_barcode || 0],
     ['Missing SKUs', s.missing_sku || 0],
-    ['Generated SKUs', s.generated_sku || 0],
-    ['Missing codes', s.missing_barcode_sku || 0],
+    ['Need barcode/SKU', s.generated_sku || 0],
+    ['Both blank', s.missing_barcode_sku || 0],
   ];
   document.getElementById('summary').innerHTML = items.map(([label, value]) =>
     '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
