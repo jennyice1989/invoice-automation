@@ -15,6 +15,7 @@ and pushes a consignment to Lightspeed.
 - **Pricing review** — target margin, MSRP, and first-party retailer comparison notes; retail changes require approval before upload
 - **Product image upload** — after a drafted product is created, upload an approved JPG/PNG/WebP directly to Lightspeed
 - **Catalog audit** — reviews existing Lightspeed products for missing photos, weak descriptions, missing codes, and pricing below target
+- **Fish Label Maker** — searches live Lightspeed products, rechecks regular tax-exclusive retail prices, and generates DYMO 30334 fish label PDFs without changing Lightspeed
 - **Review screen** — split into "existing to update" and "uncertain"; one-click match, search, create-new, or skip
 - **Pushes to Lightspeed** — creates new products, updates costs, uploads approved retail changes, pushes consignment, optionally marks RECEIVED
 - **CSV export** — per-invoice backup CSV of every line decision
@@ -74,6 +75,14 @@ prices below the `1.5x cost` target. You can draft copy with OpenAI, approve a
 price change, or upload an approved image. Nothing is changed in Lightspeed
 until you approve the specific action.
 
+**Print fish labels.** Use Fish labels to search live Lightspeed products by
+fish name, variety, sex, size, or SKU. Select the exact product yourself,
+adjust the display name or quantity, optionally enter a manual override, then
+download a DYMO 30334 PDF. The app rechecks Lightspeed before PDF generation
+and shows any price changes for review. Manual labels are allowed but marked as
+not verified against Lightspeed. Label generation does not write to Lightspeed,
+change inventory, or update prices.
+
 **Subsequent invoices from the same supplier** auto-match against everything
 you've taught it. The unknown rate trends toward zero.
 
@@ -130,6 +139,7 @@ All require authentication via the session cookie except `/healthz`.
 - `GET /history` — recent invoices
 - `GET /review/{id}` — review/finalize screen
 - `GET /audit` — existing catalog audit queue
+- `GET /fish-labels` — Fish Label Maker page
 - `GET /settings` — pricing rules + MSRP upload
 - `POST /invoices/process` (multipart PDF) — upload + extract + match + price
 - `GET /invoices` — recent invoice list (JSON)
@@ -139,6 +149,9 @@ All require authentication via the session cookie except `/healthz`.
 - `GET /pricing/rules`, `POST /pricing/rules`, `DELETE /pricing/rules/{id}`
 - `POST /pricing/msrp` (multipart CSV) — upload MSRP list per supplier
 - `GET /products/search?q=...` — search Lightspeed catalog for manual picks
+- `GET /fish-labels/search?q=...` — live Lightspeed fish-product search
+- `POST /fish-labels/preview` — recheck selected fish prices before printing
+- `POST /fish-labels/pdf` — generate DYMO 30334 fish label PDF
 - `GET /audit/products` — audit existing products from the local catalog cache
 - `POST /audit/sync` — refresh catalog cache before audit review
 - `POST /audit/products/{id}/draft-description` — draft catalog copy with OpenAI

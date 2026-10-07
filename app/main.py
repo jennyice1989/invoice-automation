@@ -50,6 +50,10 @@ from app.enrichment import (
     EnrichmentError, enrich_batch, enrich_product,
 )
 from app.extraction import ExtractionError, extract_invoice_from_pdf
+from app.fish_labels import (
+    FishLabel, fetched_at_iso, generate_fish_label_pdf, label_price,
+    printable_fish_name, product_variant_text, regular_retail_price, to_price,
+)
 from app.lightspeed import (
     LightspeedAuthError, LightspeedClient, LightspeedError,
     LightspeedNotFoundError, MatchedLineItem,
@@ -66,7 +70,7 @@ from app.supplier_catalog import (
 )
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, BARCODES_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, FISH_LABELS_HTML,
     API_COMMANDS_HTML,
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
@@ -248,11 +252,25 @@ async def audit_page(request: Request):
     return HTMLResponse(AUDIT_HTML)
 
 
-@app.get("/barcodes", response_class=HTMLResponse)
-async def barcodes_page(request: Request):
+@app.get("/labels", response_class=HTMLResponse)
+async def labels_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
-    return HTMLResponse(BARCODES_HTML)
+    return RedirectResponse("/fish-labels", status_code=307)
+
+
+@app.get("/fish-labels", response_class=HTMLResponse)
+async def fish_labels_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(FISH_LABELS_HTML)
+
+
+@app.get("/barcodes", response_class=HTMLResponse)
+async def old_barcodes_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return RedirectResponse("/fish-labels", status_code=307)
 
 
 @app.get("/enrich/review/{batch_id}", response_class=HTMLResponse)
@@ -2132,6 +2150,174 @@ async def export_csv(
 # Product lookup (used by the review UI's manual-pick feature)          #
 # --------------------------------------------------------------------- #
 
+class FishLabelItemIn(BaseModel):
+    product_id: str | None = None
+    display_name: str | None = None
+    manual_price: float | None = None
+    recommended_price: float | None = None
+    selected_live_price: float | None = None
+    selected_fetched_at: str | None = None
+    quantity: int = 1
+
+
+class FishLabelPreviewRequest(BaseModel):
+    items: list[FishLabelItemIn] = Field(default_factory=list)
+    accept_price_changes: bool = False
+
+
+def _fish_product_to_dict(product: dict, *, fetched_at: str) -> dict:
+    price = regular_retail_price(product)
+    return {
+        "id": product.get("id"),
+        "name": product.get("name"),
+        "display_name": printable_fish_name(product.get("name")),
+        "sku": product.get("sku"),
+        "variant": product_variant_text(product),
+        "regular_retail_price": price,
+        "price_status": "ok" if price is not None else "missing_or_zero",
+        "fetched_at": fetched_at,
+    }
+
+
+async def _review_fish_label_items(body: FishLabelPreviewRequest) -> dict:
+    if not body.items:
+        raise HTTPException(400, "Add at least one fish label")
+    reviewed = []
+    changes = []
+    labels: list[FishLabel] = []
+    client = _client()
+    fetched_at = fetched_at_iso()
+
+    for idx, item in enumerate(body.items):
+        qty = min(max(int(item.quantity or 1), 1), 50)
+        recommended = to_price(item.recommended_price)
+        manual = to_price(item.manual_price)
+        live_price = None
+        product_name = item.display_name
+        product = None
+        source = "manual"
+        errors: list[str] = []
+
+        if item.product_id:
+            source = "lightspeed"
+            try:
+                product = await client.get_product(item.product_id)
+            except LightspeedError as exc:
+                reviewed.append({
+                    "index": idx,
+                    "product_id": item.product_id,
+                    "display_name": product_name,
+                    "error": f"Lightspeed price check failed: {exc}",
+                    "source": source,
+                    "quantity": qty,
+                })
+                continue
+            live_price = regular_retail_price(product)
+            product_name = item.display_name or product.get("name")
+            if live_price is None:
+                errors.append("Live Lightspeed price is missing, blank, or zero")
+        else:
+            if not product_name:
+                errors.append("Manual labels need a fish name")
+
+        final_price, price_source = label_price(live_price, recommended, manual)
+        if final_price is None:
+            errors.append("Enter a price before generating this label")
+
+        selected = to_price(item.selected_live_price)
+        price_changed = (
+            item.product_id
+            and selected is not None
+            and live_price is not None
+            and abs(float(selected) - float(live_price)) >= 0.005
+        )
+        if price_changed:
+            changes.append({
+                "index": idx,
+                "product_id": item.product_id,
+                "display_name": printable_fish_name(product_name),
+                "old_price": selected,
+                "new_price": live_price,
+            })
+
+        override_below_live = manual is not None and live_price is not None and manual < live_price
+        row = {
+            "index": idx,
+            "product_id": item.product_id,
+            "display_name": printable_fish_name(product_name),
+            "entered_display_name": item.display_name,
+            "sku": (product or {}).get("sku"),
+            "variant": product_variant_text(product or {}) if product else None,
+            "live_price": live_price,
+            "recommended_price": recommended,
+            "manual_price": manual,
+            "final_price": final_price,
+            "price_source": price_source,
+            "override_below_live": override_below_live,
+            "price_changed": price_changed,
+            "selected_live_price": selected,
+            "selected_fetched_at": item.selected_fetched_at,
+            "fetched_at": fetched_at if item.product_id else None,
+            "source": source,
+            "unverified": not bool(item.product_id),
+            "quantity": qty,
+            "errors": errors,
+        }
+        reviewed.append(row)
+        if final_price is not None and not errors:
+            labels.append(FishLabel(
+                name=row["display_name"],
+                price=final_price,
+                quantity=qty,
+                unverified=row["unverified"],
+                source=source,
+            ))
+
+    return {"items": reviewed, "changes": changes, "labels": labels}
+
+
+@app.get("/fish-labels/search", dependencies=[Depends(require_auth)])
+async def search_fish_labels(q: str):
+    q = (q or "").strip()
+    if not q:
+        return {"data": []}
+    try:
+        fetched_at = fetched_at_iso()
+        products = await _client().search_products(q, limit=20)
+    except LightspeedError as exc:
+        raise HTTPException(502, f"Lightspeed search failed: {exc}") from exc
+    return {"data": [_fish_product_to_dict(p, fetched_at=fetched_at) for p in products]}
+
+
+@app.post("/fish-labels/preview", dependencies=[Depends(require_auth)])
+async def preview_fish_labels(body: FishLabelPreviewRequest):
+    result = await _review_fish_label_items(body)
+    return {
+        "data": result["items"],
+        "changes": result["changes"],
+    }
+
+
+@app.post("/fish-labels/pdf", dependencies=[Depends(require_auth)])
+async def download_fish_labels_pdf(body: FishLabelPreviewRequest):
+    result = await _review_fish_label_items(body)
+    errored = [r for r in result["items"] if r.get("errors") or r.get("error")]
+    if errored:
+        raise HTTPException(400, {"message": "Some labels need review before PDF generation", "items": errored})
+    if result["changes"] and not body.accept_price_changes:
+        raise HTTPException(409, {
+            "message": "Prices changed since selection. Review the changes and try again.",
+            "changes": result["changes"],
+            "items": result["items"],
+        })
+    pdf = generate_fish_label_pdf(result["labels"])
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="fish-labels-dymo-30334.pdf"'},
+    )
+
+
 @app.get("/products/search", dependencies=[Depends(require_auth)])
 async def search_products(q: str, session: AsyncSession = Depends(_session)):
     """Search products by name (for manual selection in the review UI).
@@ -2154,7 +2340,11 @@ async def search_products(q: str, session: AsyncSession = Depends(_session)):
     for p in products:
         items.append({
             "id": p["id"], "name": p.get("name"), "sku": p.get("sku"),
+            "barcode": p.get("barcode"),
+            "supplier_code": p.get("supplier_code"),
+            "brand_name": p.get("brand_name"),
             "supply_price": p.get("supply_price"),
+            "price_excluding_tax": p.get("price_excluding_tax"),
         })
     return {"data": items}
 

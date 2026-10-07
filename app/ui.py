@@ -100,7 +100,7 @@ _NAV = """<nav>
 <a href="/" id="nav-home">Upload</a>
 <a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/audit" id="nav-audit">Catalog audit</a>
-<a href="/barcodes" id="nav-barcodes">Barcodes</a>
+<a href="/fish-labels" id="nav-fish-labels">Fish labels</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
 <a href="/api-commands" id="nav-api">API</a>
@@ -1639,56 +1639,103 @@ loadCommands();
 </body></html>"""
 
 
-BARCODES_HTML = """<!DOCTYPE html>
+FISH_LABELS_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Barcode creation</title>
+<title>Fish Label Maker</title>
 <style>""" + _COMMON_CSS + """
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-.toolbar input { max-width:360px; }
+.toolbar input { max-width:420px; }
+.grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; align-items:start; }
+.label-preview { width:324px; height:180px; max-width:100%; background:#fff; color:#111; border:1px solid var(--border); display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; padding:16px; }
+.label-preview .fish-name { font-weight:800; font-size:34px; line-height:1.05; max-width:100%; }
+.label-preview .price { font-weight:900; font-size:50px; line-height:1; margin-top:10px; }
+.queue-row input { max-width:180px; }
+.warn { color:#92400e; font-weight:700; }
+.bad-text { color:var(--bad); font-weight:700; }
+@media (max-width: 900px) { .grid { grid-template-columns:1fr; } }
 </style></head><body>
 <div class="container">
-""" + _NAV.replace('id="nav-barcodes">Barcodes<', 'id="nav-barcodes" class="active">Barcodes<') + """
-  <h1>Barcode creation</h1>
-  <p class="subtitle">Find products using generated/internal SKUs, then replace them with the real barcode used as the SKU.</p>
+""" + _NAV.replace('id="nav-fish-labels">Fish labels<', 'id="nav-fish-labels" class="active">Fish labels<') + """
+  <h1>Fish Label Maker</h1>
+  <p class="subtitle">Search live Lightspeed fish products, queue labels, verify current retail prices, and download DYMO 30334 PDFs.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Search Lightspeed</h2>
+      <div class="toolbar">
+        <input id="fishQ" type="text" placeholder="Fish name, variety, sex, size, SKU" onkeydown="if(event.key==='Enter') searchFish()" />
+        <button class="primary" onclick="searchFish()">Search</button>
+      </div>
+      <div id="searchBox" class="muted">Enter a fish name to search live Lightspeed products.</div>
+      <hr/>
+      <h3>Manual label</h3>
+      <div class="toolbar">
+        <input id="manualName" type="text" placeholder="Fish name" />
+        <input id="manualPrice" type="number" min="0" step="0.01" placeholder="Price" />
+        <button class="secondary" onclick="addManual()">Add unverified</button>
+      </div>
+      <small class="muted">Manual labels are clearly marked in the review as not verified against Lightspeed.</small>
+    </div>
+
+    <div class="card">
+      <h2>On-screen preview</h2>
+      <div class="label-preview">
+        <div id="previewName" class="fish-name">Fish Name</div>
+        <div id="previewPrice" class="price">$0.00</div>
+      </div>
+      <p class="subtitle">Print with DYMO 30334, Actual Size / 100%, one copy.</p>
+    </div>
+  </div>
 
   <div class="card">
-    <h2>Products needing barcode/SKU</h2>
+    <h2>Label queue</h2>
+    <div id="queueBox" class="muted">No fish labels queued yet.</div>
     <div class="toolbar">
-      <input id="generatedSkuQ" type="text" placeholder="Search product, generated SKU, supplier code" onkeydown="if(event.key==='Enter') loadGeneratedSkus()" />
-      <button class="secondary" onclick="loadGeneratedSkus()">Search</button>
-      <a class="secondary" href="/admin/generated-skus.csv">Export CSV</a>
+      <button class="secondary" onclick="previewPrices()">Recheck prices</button>
+      <button class="primary" onclick="downloadPdf(false)">Download PDF</button>
+      <button class="secondary" onclick="clearQueue()">Clear queue</button>
     </div>
-    <div id="generatedSkuBox" class="muted">Loading...</div>
+    <div id="reviewBox"></div>
   </div>
 </div>
 <script>
+let SEARCH_RESULTS = [];
+let QUEUE = [];
+let ACCEPT_PRICE_CHANGES = false;
+
 async function api(url, opts) {
   const resp = await fetch(url, opts || {});
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/pdf')) return { resp };
   const data = await resp.json();
-  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  if (!resp.ok) {
+    const err = new Error(data.detail && data.detail.message ? data.detail.message : data.detail || resp.statusText);
+    err.detail = data.detail;
+    err.status = resp.status;
+    throw err;
+  }
   return data;
 }
 
-async function loadGeneratedSkus() {
-  const q = document.getElementById('generatedSkuQ').value.trim();
-  const box = document.getElementById('generatedSkuBox');
-  box.innerHTML = '<span class="spinner"></span>Loading...';
+async function searchFish() {
+  const q = document.getElementById('fishQ').value.trim();
+  const box = document.getElementById('searchBox');
+  if (!q) { box.innerHTML = '<span class="muted">Enter a fish name to search.</span>'; return; }
+  box.innerHTML = '<span class="spinner"></span>Searching live Lightspeed...';
   try {
-    const data = await api('/admin/generated-skus?q=' + encodeURIComponent(q));
-    if (!data.data.length) {
-      box.innerHTML = '<span class="muted">No products need barcode/SKU cleanup.</span>';
+    const data = await api('/fish-labels/search?q=' + encodeURIComponent(q));
+    SEARCH_RESULTS = data.data || [];
+    if (!SEARCH_RESULTS.length) {
+      box.innerHTML = '<div class="warn">No live Lightspeed match found. Use manual label entry if needed.</div>';
       return;
     }
-    let h = '<table><thead><tr><th>Product</th><th>Current SKU</th><th>Current barcode</th><th>Real barcode/SKU</th><th></th></tr></thead><tbody>';
-    data.data.forEach(r => {
-      h += '<tr><td><strong>' + escape(r.name || '') + '</strong><br><small>'
-        + escape(r.brand_name || '') + ' ' + escape(r.category_name || '') + '</small><br><small>'
-        + escape(r.id || '') + '</small></td>'
-        + '<td>' + escape(r.sku || '') + '</td>'
-        + '<td>' + escape(r.barcode || '') + '</td>'
-        + '<td><input id="real-sku-' + escAttr(r.id) + '" type="text" placeholder="Scan or type barcode" /></td>'
-        + '<td><button class="primary" onclick="updateGeneratedSku(\\'' + escAttr(r.id) + '\\')">Update</button></td></tr>';
+    let h = '<table><thead><tr><th>Product</th><th>SKU / variant</th><th>Regular retail</th><th></th></tr></thead><tbody>';
+    SEARCH_RESULTS.forEach((r, i) => {
+      h += '<tr><td><strong>' + escape(r.name || '') + '</strong><br><small>Fetched ' + escape(new Date(r.fetched_at).toLocaleString()) + '</small></td>'
+        + '<td>' + escape(r.sku || '') + '<br><small>' + escape(r.variant || '') + '</small></td>'
+        + '<td>' + (r.regular_retail_price == null ? '<span class="bad-text">Missing/zero</span>' : money(r.regular_retail_price)) + '</td>'
+        + '<td><button class="secondary" onclick="addResult(' + i + ')">Select</button></td></tr>';
     });
     h += '</tbody></table>';
     box.innerHTML = h;
@@ -1697,24 +1744,439 @@ async function loadGeneratedSkus() {
   }
 }
 
-async function updateGeneratedSku(id) {
-  const input = document.getElementById('real-sku-' + id);
-  const sku = (input ? input.value : '').trim();
-  if (!sku) { alert('Enter the real barcode/SKU.'); return; }
-  await api('/admin/generated-skus/' + encodeURIComponent(id) + '/update', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ sku }),
+function addResult(index) {
+  const r = SEARCH_RESULTS[index];
+  if (!r) return;
+  QUEUE.push({
+    product_id: r.id,
+    original_name: r.name,
+    display_name: r.display_name || r.name,
+    sku: r.sku,
+    variant: r.variant,
+    selected_live_price: r.regular_retail_price,
+    selected_fetched_at: r.fetched_at,
+    recommended_price: null,
+    manual_price: null,
+    quantity: 1,
+    unverified: false,
   });
-  loadGeneratedSkus();
+  ACCEPT_PRICE_CHANGES = false;
+  renderQueue();
 }
 
+function addManual() {
+  const name = document.getElementById('manualName').value.trim();
+  const price = parseFloat(document.getElementById('manualPrice').value);
+  if (!name || !(price > 0)) { alert('Enter a manual fish name and price.'); return; }
+  QUEUE.push({
+    product_id: null,
+    original_name: name,
+    display_name: name,
+    selected_live_price: null,
+    selected_fetched_at: null,
+    manual_price: price,
+    recommended_price: null,
+    quantity: 1,
+    unverified: true,
+  });
+  document.getElementById('manualName').value = '';
+  document.getElementById('manualPrice').value = '';
+  renderQueue();
+}
+
+function renderQueue() {
+  const box = document.getElementById('queueBox');
+  document.getElementById('reviewBox').innerHTML = '';
+  if (!QUEUE.length) {
+    box.innerHTML = '<span class="muted">No fish labels queued yet.</span>';
+    updatePreview(null);
+    return;
+  }
+  let h = '<table><thead><tr><th>Display name</th><th>Current price</th><th>Override</th><th>Recommended</th><th>Qty</th><th></th></tr></thead><tbody>';
+  QUEUE.forEach((r, i) => {
+    h += '<tr class="queue-row"><td><input value="' + escAttr(r.display_name || '') + '" onchange="editItem(' + i + ',\\'display_name\\',this.value)" />'
+      + '<br><small>' + escape(r.unverified ? 'Manual - not verified against Lightspeed' : (r.original_name || '')) + '</small>'
+      + (r.variant ? '<br><small>Variant/size: ' + escape(r.variant) + '</small>' : '') + '</td>'
+      + '<td>' + (r.selected_live_price == null ? '<span class="bad-text">Missing/zero</span>' : money(r.selected_live_price)) + '<br><small>' + escape(r.selected_fetched_at ? new Date(r.selected_fetched_at).toLocaleString() : '') + '</small></td>'
+      + '<td><input type="number" min="0" step="0.01" value="' + escAttr(r.manual_price == null ? '' : r.manual_price) + '" onchange="editItem(' + i + ',\\'manual_price\\',this.value)" placeholder="Optional" /></td>'
+      + '<td><input type="number" min="0" step="0.01" value="' + escAttr(r.recommended_price == null ? '' : r.recommended_price) + '" onchange="editItem(' + i + ',\\'recommended_price\\',this.value)" placeholder="Optional" /></td>'
+      + '<td><input type="number" min="1" max="50" value="' + escAttr(r.quantity || 1) + '" onchange="editItem(' + i + ',\\'quantity\\',this.value)" /></td>'
+      + '<td><button class="secondary" onclick="removeItem(' + i + ')">Remove</button></td></tr>';
+  });
+  h += '</tbody></table>';
+  box.innerHTML = h;
+  updatePreview(QUEUE[0]);
+}
+
+function editItem(index, key, value) {
+  if (!QUEUE[index]) return;
+  if (['manual_price', 'recommended_price'].includes(key)) QUEUE[index][key] = value === '' ? null : parseFloat(value);
+  else if (key === 'quantity') QUEUE[index][key] = Math.min(Math.max(parseInt(value || '1'), 1), 50);
+  else QUEUE[index][key] = value;
+  ACCEPT_PRICE_CHANGES = false;
+  renderQueue();
+}
+
+function removeItem(index) {
+  QUEUE.splice(index, 1);
+  renderQueue();
+}
+
+function clearQueue() {
+  QUEUE = [];
+  ACCEPT_PRICE_CHANGES = false;
+  renderQueue();
+}
+
+function updatePreview(item) {
+  const name = item ? (item.display_name || item.original_name || 'Fish Name') : 'Fish Name';
+  const price = item ? (item.manual_price || item.recommended_price || item.selected_live_price || 0) : 0;
+  document.getElementById('previewName').textContent = name;
+  document.getElementById('previewPrice').textContent = money(price);
+}
+
+function payload() {
+  return {
+    accept_price_changes: ACCEPT_PRICE_CHANGES,
+    items: QUEUE.map(r => ({
+      product_id: r.product_id,
+      display_name: r.display_name,
+      manual_price: r.manual_price,
+      recommended_price: r.recommended_price,
+      selected_live_price: r.selected_live_price,
+      selected_fetched_at: r.selected_fetched_at,
+      quantity: r.quantity || 1,
+    })),
+  };
+}
+
+async function previewPrices() {
+  const out = document.getElementById('reviewBox');
+  if (!QUEUE.length) { alert('Add at least one fish label.'); return; }
+  out.innerHTML = '<span class="spinner"></span>Rechecking live prices...';
+  try {
+    const data = await api('/fish-labels/preview', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload()),
+    });
+    out.innerHTML = reviewHtml(data.data || [], data.changes || []);
+    ACCEPT_PRICE_CHANGES = !(data.changes || []).length;
+  } catch (err) {
+    out.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+async function downloadPdf(force) {
+  if (!QUEUE.length) { alert('Add at least one fish label.'); return; }
+  if (force) ACCEPT_PRICE_CHANGES = true;
+  try {
+    const result = await api('/fish-labels/pdf', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload()),
+    });
+    const blob = await result.resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'fish-labels-dymo-30334.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    document.getElementById('reviewBox').innerHTML = '<div class="success">PDF downloaded. Print DYMO 30334 at Actual Size / 100%, one copy.</div>';
+  } catch (err) {
+    if (err.status === 409 && err.detail) {
+      document.getElementById('reviewBox').innerHTML = reviewHtml(err.detail.items || [], err.detail.changes || [])
+        + '<div class="toolbar"><button class="primary" onclick="downloadPdf(true)">Accept changed prices and download</button></div>';
+      return;
+    }
+    const detailItems = err.detail && err.detail.items ? reviewHtml(err.detail.items, []) : '';
+    document.getElementById('reviewBox').innerHTML = '<div class="error">' + escape(err.message) + '</div>' + detailItems;
+  }
+}
+
+function reviewHtml(items, changes) {
+  let h = '';
+  if (changes.length) {
+    h += '<div class="error">Prices changed since selection. Review before downloading.</div>';
+  }
+  h += '<table><thead><tr><th>Fish</th><th>Live price</th><th>Final label price</th><th>Status</th></tr></thead><tbody>';
+  items.forEach(r => {
+    let notes = [];
+    if (r.unverified) notes.push('Manual - not verified');
+    if (r.override_below_live) notes.push('Override below existing price');
+    if (r.price_changed) notes.push('Price changed since selected');
+    if (r.errors && r.errors.length) notes = notes.concat(r.errors);
+    if (r.error) notes.push(r.error);
+    h += '<tr><td><strong>' + escape(r.display_name || '') + '</strong><br><small>' + escape(r.variant || '') + '</small></td>'
+      + '<td>' + money(r.live_price) + '<br><small>' + escape(r.fetched_at ? new Date(r.fetched_at).toLocaleString() : '') + '</small></td>'
+      + '<td><strong>' + money(r.final_price) + '</strong><br><small>' + escape(r.price_source || '') + '</small></td>'
+      + '<td>' + (notes.length ? '<span class="warn">' + notes.map(escape).join('<br>') + '</span>' : '<span class="success">Ready</span>') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  return h;
+}
+
+function money(v) { return v == null || v === '' ? '' : '$' + Number(v).toFixed(2); }
 function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
 function escAttr(s) { return escape(s); }
 
-loadGeneratedSkus();
+renderQueue();
+</script>
+</body></html>"""
+
+
+LABELS_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Label printing</title>
+<style>""" + _COMMON_CSS + """
+.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.toolbar input { max-width:360px; }
+.label-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:12px 0; }
+.print-toolbar { display:grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap:10px; }
+.print-toolbar label { font-size:12px; color:var(--muted); font-weight:700; }
+.print-toolbar input, .print-toolbar select { margin-top:4px; }
+.print-sheet { background:#fff; color:#111; display:grid; grid-template-columns: repeat(3, 2.625in); gap:0.125in; padding:0.2in; width:max-content; border:1px solid var(--border); }
+.print-label { width:2.625in; min-height:1in; border:1px dashed #ddd; padding:0.08in 0.1in; overflow:hidden; display:flex; flex-direction:column; justify-content:space-between; page-break-inside:avoid; }
+.label-name { font-size:10px; line-height:1.15; font-weight:700; max-height:0.32in; overflow:hidden; }
+.label-price { font-size:20px; line-height:1; font-weight:800; }
+.label-code { font-size:8px; text-align:center; letter-spacing:0; }
+.barcode-svg { width:100%; height:0.28in; display:block; }
+@media print {
+  body { background:#fff; }
+  body * { visibility:hidden; }
+  #printArea, #printArea * { visibility:visible; }
+  #printArea { position:absolute; left:0; top:0; }
+  .print-sheet { border:0; padding:0; gap:0.125in; }
+  .print-label { border:0; }
+}
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-labels">Labels<', 'id="nav-labels" class="active">Labels<') + """
+  <h1>Label printing</h1>
+  <p class="subtitle">Create product labels from price-change reprints or by searching the catalog.</p>
+
+  <div class="card">
+    <h2>Labels to print</h2>
+    <div class="toolbar">
+      <select id="labelStatus" onchange="loadLabelReprints()">
+        <option value="pending">Pending price changes</option>
+        <option value="printed">Printed</option>
+        <option value="all">All</option>
+      </select>
+      <a class="secondary" id="labelCsv" href="/admin/label-reprints.csv">Export CSV</a>
+      <button class="secondary" onclick="addSelectedQueueLabels()">Add selected to sheet</button>
+      <button class="primary" onclick="printLabels()">Print sheet</button>
+      <button class="secondary" onclick="markLabelsPrinted()">Mark selected printed</button>
+    </div>
+    <div id="labelBox" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h2>Add product label</h2>
+    <div class="toolbar">
+      <input id="productQ" type="text" placeholder="Search product name, SKU, or barcode" onkeydown="if(event.key==='Enter') searchProducts()" />
+      <button class="secondary" onclick="searchProducts()">Search</button>
+    </div>
+    <div id="productBox" class="muted">Search for a product to add labels manually.</div>
+  </div>
+
+  <div class="card">
+    <h2>Print sheet</h2>
+    <div class="print-toolbar">
+      <label>Copies per item<input id="copies" type="number" min="1" max="50" value="1" onchange="renderPrintSheet()" /></label>
+      <label>Barcode source<select id="barcodeSource" onchange="renderPrintSheet()"><option value="barcode">Barcode first</option><option value="sku">SKU first</option></select></label>
+      <label>Price source<select id="priceSource" onchange="renderPrintSheet()"><option value="new_price">New price</option><option value="retail_price">Retail price</option></select></label>
+      <label>Show product name<select id="showName" onchange="renderPrintSheet()"><option value="yes">Yes</option><option value="no">No</option></select></label>
+    </div>
+    <div class="label-actions">
+      <button class="secondary" onclick="clearSheet()">Clear sheet</button>
+      <span id="sheetCount" class="muted">0 labels selected.</span>
+    </div>
+    <div id="printArea"><div id="printSheet" class="print-sheet"></div></div>
+  </div>
+</div>
+<script>
+let QUEUE_ROWS = [];
+let PRODUCT_ROWS = [];
+let PRINT_ITEMS = [];
+const CODE128 = '212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 112232 122132 122231 113222 123122 123221 223211 221132 221231 213212 223112 312131 311222 321122 321221 312212 322112 322211 212123 212321 232121 111323 131123 131321 112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 313121 211331 231131 213113 213311 213131 311123 311321 331121 312113 312311 332111 314111 221411 431111 111224 111422 121124 121421 141122 141221 112214 112412 122114 122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 124112 124211 411212 421112 421211 212141 214121 412121 111143 111341 131141 114113 114311 411113 411311 113141 114131 311141 411131 211412 211214 211232 2331112'.split(' ');
+
+async function api(url, opts) {
+  const resp = await fetch(url, opts || {});
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+async function loadLabelReprints() {
+  const status = document.getElementById('labelStatus').value;
+  document.getElementById('labelCsv').href = '/admin/label-reprints.csv?status=' + encodeURIComponent(status);
+  const box = document.getElementById('labelBox');
+  box.innerHTML = '<span class="spinner"></span>Loading...';
+  try {
+    const data = await api('/admin/label-reprints?status=' + encodeURIComponent(status));
+    QUEUE_ROWS = data.data || [];
+    if (!QUEUE_ROWS.length) {
+      box.innerHTML = '<span class="muted">No label rows found.</span>';
+      return;
+    }
+    let h = '<table><thead><tr><th></th><th>Product</th><th>SKU / barcode</th><th>Price</th><th>When</th></tr></thead><tbody>';
+    QUEUE_ROWS.forEach(r => {
+      h += '<tr><td><input type="checkbox" class="label-select" value="' + r.id + '" /></td>'
+        + '<td><strong>' + escape(r.product_name || '') + '</strong><br><small>' + escape(r.lightspeed_product_id || '') + '</small></td>'
+        + '<td>' + escape(r.sku || '') + '<br><small>' + escape(r.barcode || '') + '</small></td>'
+        + '<td>' + money(r.old_price) + ' &rarr; <strong>' + money(r.new_price) + '</strong><br><small>' + escape(r.status || '') + '</small></td>'
+        + '<td>' + escape(r.created_at ? new Date(r.created_at).toLocaleString() : '') + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    box.innerHTML = h;
+  } catch (err) {
+    box.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+function addSelectedQueueLabels() {
+  const ids = Array.from(document.querySelectorAll('.label-select:checked')).map(cb => parseInt(cb.value));
+  const rows = QUEUE_ROWS.filter(r => ids.includes(r.id));
+  if (!rows.length) { alert('Select at least one label row.'); return; }
+  rows.forEach(r => PRINT_ITEMS.push({
+    key: 'queue-' + r.id,
+    name: r.product_name,
+    sku: r.sku,
+    barcode: r.barcode,
+    new_price: r.new_price,
+    retail_price: r.new_price,
+  }));
+  renderPrintSheet();
+}
+
+async function markLabelsPrinted() {
+  const ids = Array.from(document.querySelectorAll('.label-select:checked')).map(cb => parseInt(cb.value));
+  if (!ids.length) { alert('Select at least one label row.'); return; }
+  await api('/admin/label-reprints/mark-printed', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ ids }),
+  });
+  loadLabelReprints();
+}
+
+async function searchProducts() {
+  const q = document.getElementById('productQ').value.trim();
+  const box = document.getElementById('productBox');
+  if (!q) { box.innerHTML = '<span class="muted">Search for a product to add labels manually.</span>'; return; }
+  box.innerHTML = '<span class="spinner"></span>Searching...';
+  try {
+    const data = await api('/products/search?q=' + encodeURIComponent(q));
+    PRODUCT_ROWS = data.data || [];
+    if (!PRODUCT_ROWS.length) {
+      box.innerHTML = '<span class="muted">No products found. Sync catalog if this product should exist.</span>';
+      return;
+    }
+    let h = '<table><thead><tr><th>Product</th><th>SKU / barcode</th><th>Retail</th><th></th></tr></thead><tbody>';
+    PRODUCT_ROWS.forEach((r, i) => {
+      h += '<tr><td><strong>' + escape(r.name || '') + '</strong><br><small>' + escape(r.id || '') + '</small></td>'
+        + '<td>' + escape(r.sku || '') + '<br><small>' + escape(r.barcode || '') + '</small></td>'
+        + '<td>' + money(r.price_excluding_tax) + '</td>'
+        + '<td><button class="secondary" onclick="addProductLabel(' + i + ')">Add</button></td></tr>';
+    });
+    h += '</tbody></table>';
+    box.innerHTML = h;
+  } catch (err) {
+    box.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  }
+}
+
+function addProductLabel(index) {
+  const r = PRODUCT_ROWS[index];
+  if (!r) return;
+  PRINT_ITEMS.push({
+    key: 'product-' + r.id + '-' + Date.now(),
+    name: r.name,
+    sku: r.sku,
+    barcode: r.barcode,
+    new_price: r.price_excluding_tax,
+    retail_price: r.price_excluding_tax,
+  });
+  renderPrintSheet();
+}
+
+function renderPrintSheet() {
+  const sheet = document.getElementById('printSheet');
+  const copies = Math.min(Math.max(parseInt(document.getElementById('copies').value || '1'), 1), 50);
+  const barcodeSource = document.getElementById('barcodeSource').value;
+  const priceSource = document.getElementById('priceSource').value;
+  const showName = document.getElementById('showName').value === 'yes';
+  const labels = [];
+  PRINT_ITEMS.forEach(item => { for (let i = 0; i < copies; i++) labels.push(item); });
+  document.getElementById('sheetCount').textContent = labels.length + ' label' + (labels.length === 1 ? '' : 's') + ' selected.';
+  if (!labels.length) {
+    sheet.innerHTML = '<div class="muted">Add labels from the queue or product search.</div>';
+    return;
+  }
+  sheet.innerHTML = labels.map(item => {
+    const code = barcodeSource === 'sku' ? (item.sku || item.barcode || '') : (item.barcode || item.sku || '');
+    const price = priceSource === 'retail_price' ? item.retail_price : item.new_price;
+    return '<div class="print-label">'
+      + '<div class="label-name">' + (showName ? escape(item.name || '') : '') + '</div>'
+      + '<div class="label-price">' + money(price) + '</div>'
+      + barcodeSvg(code)
+      + '<div class="label-code">' + escape(code || '') + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function clearSheet() {
+  PRINT_ITEMS = [];
+  renderPrintSheet();
+}
+
+function printLabels() {
+  if (!PRINT_ITEMS.length) { alert('Add at least one label to the sheet.'); return; }
+  renderPrintSheet();
+  window.print();
+}
+
+function barcodeSvg(value) {
+  const text = String(value || '').trim();
+  if (!text) return '<div class="label-code">No barcode</div>';
+  const bars = code128Bars(text);
+  let x = 0;
+  let rects = '';
+  for (let i = 0; i < bars.length; i++) {
+    const w = parseInt(bars[i], 10);
+    if (i % 2 === 0) rects += '<rect x="' + x + '" y="0" width="' + w + '" height="42"></rect>';
+    x += w;
+  }
+  return '<svg class="barcode-svg" viewBox="0 0 ' + x + ' 42" preserveAspectRatio="none" aria-label="barcode">' + rects + '</svg>';
+}
+
+function code128Bars(value) {
+  let codes = [104];
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    codes.push(code >= 32 && code <= 126 ? code - 32 : 0);
+  }
+  let checksum = codes[0];
+  for (let i = 1; i < codes.length; i++) checksum += codes[i] * i;
+  codes.push(checksum % 103);
+  codes.push(106);
+  return codes.map(c => CODE128[c]).join('');
+}
+
+function escape(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+function money(v) { return v == null || v === '' ? '' : '$' + Number(v).toFixed(2); }
+
+loadLabelReprints();
+renderPrintSheet();
 </script>
 </body></html>"""
 
