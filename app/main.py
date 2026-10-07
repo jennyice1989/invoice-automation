@@ -3186,12 +3186,13 @@ def _int_arg(
 def _parse_price_update_lines(text: str) -> tuple[dict[str, float], list[str]]:
     updates: dict[str, float] = {}
     errors: list[str] = []
-    text = (text or "").strip()
-    if not text:
+    raw_text = text or ""
+    parsed_text = raw_text.strip()
+    if not parsed_text:
         return updates, ["Paste at least one SKU and price"]
 
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(parsed_text)
         if isinstance(parsed, dict):
             for sku, price in parsed.items():
                 sku_text = str(sku).strip()
@@ -3208,7 +3209,7 @@ def _parse_price_update_lines(text: str) -> tuple[dict[str, float], list[str]]:
     except json.JSONDecodeError:
         pass
 
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+    for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
         line = raw_line.split("#", 1)[0].strip().rstrip(",")
         if not line or line in {"{", "}"}:
             continue
