@@ -2794,10 +2794,57 @@ class EnrichItemIn(BaseModel):
     name: str
     supplier_name: str | None = None
     kind_hint: str | None = None  # 'dry_good' | 'live_fish' | 'live_invert' | 'live_plant' | 'live_coral'
+    sku: str | None = None
+    barcode: str | None = None
+    supplier_id: str | None = None
+    supplier_code: str | None = None
+    supply_price: float | None = None
+    retail_price: float | None = None
+    product_category: str | None = None
+    product_category_id: str | None = None
+    brand_name: str | None = None
+    brand_id: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+    has_photo: bool | None = None
+    draft_with_openai: bool = True
 
 
 class EnrichBatchRequest(BaseModel):
     items: list[EnrichItemIn]
+
+
+def _clean_tags(tags: list[str] | None) -> dict | None:
+    cleaned = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    return {"list": cleaned} if cleaned else None
+
+
+def _draft_from_enrich_item(item: EnrichItemIn, batch_id: str) -> EnrichmentDraft | None:
+    if not item.name or not item.name.strip():
+        return None
+    valid_kinds = ("dry_good", "live_fish", "live_invert", "live_plant", "live_coral")
+    kind = item.kind_hint if item.kind_hint in valid_kinds else "unknown"
+    should_draft = bool(item.draft_with_openai)
+    return EnrichmentDraft(
+        batch_id=batch_id,
+        input_name=item.name.strip(),
+        final_name=item.name.strip(),
+        kind=kind,
+        sku=(item.sku or "").strip() or None,
+        barcode=(item.barcode or "").strip() or None,
+        supplier_id=(item.supplier_id or "").strip() or None,
+        supplier_code=(item.supplier_code or "").strip() or None,
+        supply_price=item.supply_price,
+        retail_price=item.retail_price,
+        product_category=(item.product_category or "").strip() or None,
+        product_category_id=(item.product_category_id or "").strip() or None,
+        brand_name=(item.brand_name or "").strip() or None,
+        brand_id=(item.brand_id or "").strip() or None,
+        description=(item.description or "").strip() or None,
+        tags=_clean_tags(item.tags),
+        has_photo=bool(item.has_photo),
+        status="PENDING_ENRICH" if should_draft else "DRAFT",
+    )
 
 
 @app.post("/enrich/batch", dependencies=[Depends(require_auth)])
@@ -2814,27 +2861,28 @@ async def enrich_products_batch(
         raise HTTPException(400, "Max 100 products per batch")
 
     batch_id = _uuid.uuid4().hex[:12]
-    valid_kinds = ("dry_good", "live_fish", "live_invert", "live_plant", "live_coral")
+    queued_for_drafting = 0
+    added = 0
     for item in body.items:
-        if not item.name or not item.name.strip():
+        draft = _draft_from_enrich_item(item, batch_id)
+        if not draft:
             continue
-        kind = item.kind_hint if item.kind_hint in valid_kinds else "unknown"
-        draft = EnrichmentDraft(
-            batch_id=batch_id,
-            input_name=item.name.strip(),
-            final_name=item.name.strip(),
-            kind=kind,
-            status="PENDING_ENRICH",
-        )
         session.add(draft)
+        added += 1
+        if draft.status == "PENDING_ENRICH":
+            queued_for_drafting += 1
+    if not added:
+        raise HTTPException(400, "No valid products submitted")
     await session.flush()
 
-    # Run drafting in background so the response is fast
-    background_tasks.add_task(_enrich_pending_drafts, batch_id)
+    if queued_for_drafting:
+        # Run drafting in background so the response is fast
+        background_tasks.add_task(_enrich_pending_drafts, batch_id)
 
     return {
         "batch_id": batch_id,
-        "count": len(body.items),
+        "count": added,
+        "drafting_count": queued_for_drafting,
         "redirect": f"/enrich/review/{batch_id}",
     }
 

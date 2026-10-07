@@ -2557,19 +2557,65 @@ textarea { width: 100%; min-height: 180px; font: inherit;
                 overflow: hidden; width: 120px; display: inline-block;
                 vertical-align: middle; }
 .progress-fill { height: 100%; background: var(--good); }
+.quick-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
+.quick-grid .full { grid-column: 1 / -1; }
+.quick-grid label { display:block; font-size:11px; color:var(--muted);
+  text-transform:uppercase; letter-spacing:.03em; margin-bottom:3px; }
+.quick-grid input, .quick-grid select, .quick-grid textarea {
+  width:100%; font:inherit; padding:8px 9px; border:1px solid var(--border);
+  border-radius:4px;
+}
+.quick-grid textarea { min-height:70px; resize:vertical; }
+.quick-options { display:flex; gap:12px; flex-wrap:wrap; align-items:center;
+  margin:10px 0; font-size:13px; }
+.quick-options label { display:flex; gap:6px; align-items:center; }
+@media (max-width: 850px) { .quick-grid { grid-template-columns: 1fr; } }
 </style></head><body>
 <div class="container">
 """ + _NAV.replace('id="nav-enrich">Add products<', 'id="nav-enrich" class="active">Add products<') + """
   <h1>Add products to catalog</h1>
-  <p class="subtitle">Paste product names. We draft descriptions for dry goods
-  and full care profiles for live fish, then you review before creating
-  them in Lightspeed.</p>
+  <p class="subtitle">Create new Lightspeed products without an invoice. Enter
+  full details manually or paste names and let OpenAI draft the catalog copy,
+  then review before creating anything in Lightspeed.</p>
 
   <div class="card">
-    <h2>Product names</h2>
+    <h2>Quick product</h2>
+    <p class="hint">Use this when you want to create one product directly. If
+    you leave description blank and keep OpenAI draft on, the app drafts the
+    description first; otherwise it goes straight to the review screen.</p>
+    <div class="quick-grid">
+      <div class="full"><label>Product name</label><input id="quickName" placeholder="Electric Blue Acara" /></div>
+      <div><label>Type</label><select id="quickKind">
+        <option value="">Auto-detect</option>
+        <option value="dry_good">Dry good</option>
+        <option value="live_fish">Live fish</option>
+        <option value="live_invert">Live invert</option>
+        <option value="live_plant">Live plant</option>
+        <option value="live_coral">Live coral</option>
+      </select></div>
+      <div><label>SKU</label><input id="quickSku" /></div>
+      <div><label>Barcode / UPC</label><input id="quickBarcode" /></div>
+      <div><label>Supplier code</label><input id="quickSupplierCode" /></div>
+      <div><label>Supply cost</label><input id="quickCost" type="number" min="0" step="0.01" /></div>
+      <div><label>Retail price</label><input id="quickRetail" type="number" min="0" step="0.01" /></div>
+      <div><label>Brand</label><input id="quickBrand" placeholder="Optional" /></div>
+      <div class="full"><label>Category</label><input id="quickCategory" placeholder="Optional; can pick exact Lightspeed category on review" /></div>
+      <div class="full"><label>Tags</label><input id="quickTags" placeholder="comma-separated, optional" /></div>
+      <div class="full"><label>Description HTML</label><textarea id="quickDescription" placeholder="Optional. Leave blank to let OpenAI draft it."></textarea></div>
+    </div>
+    <div class="quick-options">
+      <label><input id="quickDraft" type="checkbox" checked /> Draft / improve with OpenAI before review</label>
+      <label><input id="quickPhoto" type="checkbox" /> I have a product photo to upload after creation</label>
+    </div>
+    <button class="primary" id="quickBtn" onclick="submitQuickProduct()">Review this product</button>
+    <div id="quickStatus" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Bulk product names</h2>
     <p class="hint">One product per line. For live fish, use the species name
-    (common or scientific). You'll be able to fix the type per-product on the
-    next screen if we guess wrong.</p>
+    or variety. You'll be able to fill SKU, pricing, category, image, and any
+    missing fields on the review screen.</p>
     <textarea id="names" placeholder="API Quick Start 16oz&#10;Fluval 307 Canister Filter&#10;Electric Blue Acara&#10;Amano Shrimp&#10;Seachem Prime 500ml"></textarea>
     <div class="kind-pick">
       <span style="font-size:13px;color:var(--muted)">Type hint for all:</span>
@@ -2592,6 +2638,63 @@ textarea { width: 100%; min-height: 180px; font: inherit;
   </div>
 </div>
 <script>
+function productFromQuickForm() {
+  const name = document.getElementById('quickName').value.trim();
+  const tags = document.getElementById('quickTags').value.split(',')
+    .map(s => s.trim()).filter(Boolean);
+  return {
+    name,
+    kind_hint: document.getElementById('quickKind').value || null,
+    sku: document.getElementById('quickSku').value.trim() || null,
+    barcode: document.getElementById('quickBarcode').value.trim() || null,
+    supplier_code: document.getElementById('quickSupplierCode').value.trim() || null,
+    supply_price: numOrNull('quickCost'),
+    retail_price: numOrNull('quickRetail'),
+    brand_name: document.getElementById('quickBrand').value.trim() || null,
+    product_category: document.getElementById('quickCategory').value.trim() || null,
+    description: document.getElementById('quickDescription').value.trim() || null,
+    tags,
+    has_photo: document.getElementById('quickPhoto').checked,
+    draft_with_openai: document.getElementById('quickDraft').checked,
+  };
+}
+
+function numOrNull(id) {
+  const raw = document.getElementById(id).value;
+  if (raw === '') return null;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function submitQuickProduct() {
+  const item = productFromQuickForm();
+  if (!item.name) { showQuickStatus('Enter a product name.', 'error'); return; }
+  showQuickStatus('<span class="spinner"></span>Preparing product review...');
+  document.getElementById('quickBtn').disabled = true;
+  try {
+    const resp = await fetch('/enrich/batch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ items: [item] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showQuickStatus('Error: ' + (data.detail || resp.statusText), 'error');
+      document.getElementById('quickBtn').disabled = false;
+      return;
+    }
+    window.location.href = data.redirect;
+  } catch (err) {
+    showQuickStatus('Network error: ' + err.message, 'error');
+    document.getElementById('quickBtn').disabled = false;
+  }
+}
+
+function showQuickStatus(html, kind) {
+  const el = document.getElementById('quickStatus');
+  el.innerHTML = html;
+  el.className = kind || '';
+}
+
 async function submitBatch() {
   const raw = document.getElementById('names').value;
   const names = raw.split('\\n').map(s => s.trim()).filter(Boolean);

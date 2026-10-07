@@ -12,6 +12,7 @@ and pushes a consignment to Lightspeed.
 - **Duplicate detection** — refuses to re-import the same supplier invoice number twice
 - **Tiered matching** — saved mappings → SKU → barcode → fuzzy name; saves resolutions permanently
 - **OpenAI product descriptions** — drafts catalog-ready product names, HTML descriptions, categories, brands, and tags for review
+- **Invoice-less product creation** — manually enter new products or bulk names, review drafts, then create them in Lightspeed
 - **Pricing review** — target margin, MSRP, and first-party retailer comparison notes; retail changes require approval before upload
 - **Product image upload** — after a drafted product is created, upload an approved JPG/PNG/WebP directly to Lightspeed
 - **Catalog audit** — reviews existing Lightspeed products for missing photos, weak descriptions, missing codes, and pricing below target
@@ -68,6 +69,11 @@ on follow-up consignments.)
 first, then upload an approved supplier/manufacturer image or another licensed
 JPG, PNG, or WebP file. Do not use random web images unless usage rights are
 confirmed.
+
+**Create products without an invoice.** Use Add products to enter one product
+with SKU, barcode, cost, retail price, brand, category, tags, and description,
+or paste many product names for OpenAI drafting. Each item opens on the review
+screen before it is created in Lightspeed.
 
 **Audit existing products.** Use Catalog audit to sync existing Lightspeed
 products, flag missing photos, weak descriptions, missing codes, and retail
@@ -141,6 +147,7 @@ All require authentication via the session cookie except `/healthz`.
 - `GET /history` — recent invoices
 - `GET /review/{id}` — review/finalize screen
 - `GET /audit` — existing catalog audit queue
+- `GET /enrich` — create products without an invoice
 - `GET /fish-labels` — Fish Label Maker page
 - `GET /settings` — pricing rules + MSRP upload
 - `POST /invoices/process` (multipart PDF) — upload + extract + match + price
