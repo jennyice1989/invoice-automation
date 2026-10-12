@@ -100,6 +100,7 @@ _NAV = """<nav>
 <a href="/" id="nav-home">Upload</a>
 <a href="/enrich" id="nav-enrich">Add products</a>
 <a href="/audit" id="nav-audit">Catalog audit</a>
+<a href="/category-manager" id="nav-categories">Categories</a>
 <a href="/fish-labels" id="nav-fish-labels">Fish labels</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
@@ -800,6 +801,300 @@ async function uploadImage(id, file) {
 function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 })[c]); }
+</script>
+</body></html>"""
+
+CATEGORY_MANAGER_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Category manager</title>
+<style>""" + _COMMON_CSS + """
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.toolbar .search { flex: 1 1 320px; }
+.statusline { margin-top: 12px; font-size: 13px; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 360px); gap: 16px; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border);
+        border-radius: 999px; padding: 2px 8px; font-size: 12px; color: var(--muted); }
+.row-actions { display: flex; align-items: center; gap: 8px; }
+.category-select { min-width: 240px; }
+.small { color: var(--muted); font-size: 12px; }
+.warn-text { color: var(--warn); font-size: 12px; }
+.ok-text { color: var(--good); font-size: 12px; }
+.bad-text { color: var(--bad); font-size: 12px; }
+.results { max-height: 220px; overflow: auto; }
+.table-wrap { overflow-x: auto; }
+td.product { min-width: 260px; }
+td.category { min-width: 260px; }
+@media (max-width: 900px) {
+  .grid2 { grid-template-columns: 1fr; }
+  nav { flex-wrap: wrap; }
+}
+</style></head><body>
+<div class="container">
+""" + _NAV.replace('id="nav-categories">Categories<', 'id="nav-categories" class="active">Categories<') + """
+  <div class="brand-lockup">
+    <img src="/static/a2z-aquariums-logo.png" alt="A2Z Aquariums logo"/>
+    <div>
+      <h1>Category manager</h1>
+      <p class="subtitle">Create the A2Z taxonomy in Lightspeed, review suggestions, and assign existing products.</p>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Category setup</h2>
+      <div class="toolbar">
+        <button class="secondary" id="previewBtn" type="button">Preview missing</button>
+        <button class="primary" id="createBtn" type="button">Add missing categories</button>
+        <button class="secondary" id="syncBtn" type="button">Sync catalog</button>
+      </div>
+      <div class="statusline" id="setupStatus">Use preview first when you want to see what Lightspeed is missing.</div>
+    </div>
+
+    <div class="card">
+      <h2>Apply rules</h2>
+      <div class="stack small">
+        <div>Only assignable category leaves can be selected.</div>
+        <div>Variant families are flagged for review; siblings are never changed silently.</div>
+        <div>Assignments fetch the live product first and stop if the category changed after preview.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Products</h2>
+    <div class="toolbar">
+      <div class="search">
+        <label class="small" for="q">Search product, SKU, barcode, or supplier code</label>
+        <input id="q" type="text" placeholder="PVC elbow, refractometer, gravel vac..." />
+      </div>
+      <button class="primary" id="searchBtn" type="button">Search</button>
+      <button class="secondary" id="clearBtn" type="button">Clear results</button>
+      <button class="secondary" id="prevBtn" type="button">Previous</button>
+      <button class="secondary" id="nextBtn" type="button">Next</button>
+    </div>
+    <div class="statusline" id="productStatus">Search returns up to 50 products at a time.</div>
+    <div class="table-wrap" id="productTable"></div>
+    <div class="toolbar" style="margin-top:16px">
+      <button class="primary" id="applyBtn" type="button" disabled>Apply selected</button>
+      <span class="small" id="selectedCount">0 selected</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div class="results" id="results"><p class="small">No category assignments have been applied from this page yet.</p></div>
+  </div>
+</div>
+
+<script>
+let rows = [];
+let categories = [];
+let offset = 0;
+let limit = 50;
+let total = 0;
+let applying = false;
+
+const setupStatus = document.getElementById('setupStatus');
+const productStatus = document.getElementById('productStatus');
+const productTable = document.getElementById('productTable');
+const results = document.getElementById('results');
+const selectedCount = document.getElementById('selectedCount');
+const applyBtn = document.getElementById('applyBtn');
+
+document.getElementById('previewBtn').addEventListener('click', previewSetup);
+document.getElementById('createBtn').addEventListener('click', createMissing);
+document.getElementById('syncBtn').addEventListener('click', syncCatalog);
+document.getElementById('searchBtn').addEventListener('click', () => { offset = 0; searchProducts(); });
+document.getElementById('q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { offset = 0; searchProducts(); }
+});
+document.getElementById('clearBtn').addEventListener('click', clearResults);
+document.getElementById('prevBtn').addEventListener('click', () => {
+  if (offset <= 0) return;
+  offset = Math.max(0, offset - limit);
+  searchProducts();
+});
+document.getElementById('nextBtn').addEventListener('click', () => {
+  if (offset + limit >= total) return;
+  offset += limit;
+  searchProducts();
+});
+applyBtn.addEventListener('click', applySelected);
+
+async function previewSetup() {
+  setupStatus.innerHTML = '<span class="spinner"></span>Checking Lightspeed categories...';
+  try {
+    const data = await jsonFetch('/category-manager/preview');
+    const missing = data.missing || [];
+    const dupes = data.duplicates || [];
+    const sample = missing.slice(0, 12).map(x => '<li>' + escape(x.path) + '</li>').join('');
+    setupStatus.innerHTML =
+      '<strong>' + data.total_nodes + '</strong> taxonomy categories, <strong>' +
+      data.assignable_count + '</strong> assignable. Missing: <strong>' + missing.length +
+      '</strong>. Duplicates: <strong>' + dupes.length + '</strong>.' +
+      (sample ? '<ul>' + sample + (missing.length > 12 ? '<li>...</li>' : '') + '</ul>' : '');
+  } catch (err) {
+    setupStatus.innerHTML = '<span class="bad-text">' + escape(err.message) + '</span>';
+  }
+}
+
+async function createMissing() {
+  if (!confirm('Add missing A2Z categories to Lightspeed? This does not change product assignments.')) return;
+  setupStatus.innerHTML = '<span class="spinner"></span>Creating missing categories...';
+  try {
+    const data = await jsonFetch('/category-manager/create-missing', { method: 'POST' });
+    setupStatus.innerHTML = data.ok
+      ? '<span class="ok-text">Created ' + data.created + ' categories and verified the taxonomy.</span>'
+      : '<span class="warn-text">Created ' + data.created + '; remaining missing: ' + data.remaining_missing.length + '</span>';
+  } catch (err) {
+    setupStatus.innerHTML = '<span class="bad-text">' + escape(err.message) + '</span>';
+  }
+}
+
+async function syncCatalog() {
+  productStatus.innerHTML = '<span class="spinner"></span>Syncing Lightspeed catalog cache...';
+  try {
+    const data = await jsonFetch('/category-manager/sync-catalog', { method: 'POST' });
+    productStatus.innerHTML = '<span class="ok-text">Synced ' + data.product_count + ' active products.</span>';
+  } catch (err) {
+    productStatus.innerHTML = '<span class="bad-text">' + escape(err.message) + '</span>';
+  }
+}
+
+async function searchProducts() {
+  const q = document.getElementById('q').value.trim();
+  productStatus.innerHTML = '<span class="spinner"></span>Loading products...';
+  try {
+    const params = new URLSearchParams({ q, offset: String(offset), limit: String(limit) });
+    const data = await jsonFetch('/category-manager/products?' + params.toString());
+    rows = data.data || [];
+    categories = data.assignable_categories || [];
+    total = data.total || 0;
+    offset = data.offset || 0;
+    limit = data.limit || 50;
+    productStatus.textContent = total
+      ? 'Showing ' + (offset + 1) + '-' + Math.min(offset + limit, total) + ' of ' + total + '.'
+      : 'No products matched.';
+    renderRows();
+  } catch (err) {
+    productStatus.innerHTML = '<span class="bad-text">' + escape(err.message) + '</span>';
+  }
+}
+
+function renderRows() {
+  if (!rows.length) {
+    productTable.innerHTML = '<p class="small">No products loaded.</p>';
+    updateSelectedCount();
+    return;
+  }
+  const categoryOptions = categories.map(c => '<option value="' + escAttr(c.path) + '">' + escape(c.path) + '</option>').join('');
+  productTable.innerHTML = '<table><thead><tr>' +
+    '<th></th><th>Product</th><th>Current</th><th>Suggestion</th><th>New category</th></tr></thead><tbody>' +
+    rows.map((row, i) => {
+      const suggested = row.suggested_category || '';
+      const autoSelect = row.suggestion_confidence === 'high' && suggested;
+      const family = row.requires_family_review
+        ? '<div class="warn-text">Variant family review: ' + escape((row.family_members || []).map(x => x.name).join(', ')) + '</div>'
+        : '';
+      return '<tr>' +
+        '<td><input type="checkbox" data-index="' + i + '"' + (autoSelect ? ' checked' : '') + ' /></td>' +
+        '<td class="product"><strong>' + escape(row.name) + '</strong>' +
+        '<div class="small">SKU: ' + escape(row.sku || 'missing') + ' · ID: ' + escape(row.id) + '</div>' + family + '</td>' +
+        '<td class="category">' + escape(row.current_category || 'Uncategorized') + '</td>' +
+        '<td><span class="pill">' + escape(row.suggestion_confidence || 'review') + '</span>' +
+        '<div>' + escape(suggested || 'Manual review') + '</div><div class="small">' + escape(row.suggestion_reason || '') + '</div></td>' +
+        '<td class="category"><select class="category-select" data-index="' + i + '">' +
+        '<option value="">Choose category...</option>' + categoryOptions + '</select></td>' +
+      '</tr>';
+    }).join('') + '</tbody></table>';
+  rows.forEach((row, i) => {
+    const sel = productTable.querySelector('select[data-index="' + i + '"]');
+    if (sel && row.suggested_category) sel.value = row.suggested_category;
+  });
+  productTable.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', updateSelectedCount));
+  updateSelectedCount();
+}
+
+function selectedAssignments() {
+  return Array.from(productTable.querySelectorAll('input[type=checkbox]:checked')).slice(0, 50).map(cb => {
+    const i = Number(cb.dataset.index);
+    const select = productTable.querySelector('select[data-index="' + i + '"]');
+    const row = rows[i];
+    return {
+      product_id: row.id,
+      product_name: row.name,
+      category_path: select ? select.value : '',
+      preview_category_id: row.current_category_id || null,
+    };
+  }).filter(x => x.product_id && x.category_path);
+}
+
+function updateSelectedCount() {
+  const count = selectedAssignments().length;
+  selectedCount.textContent = count + ' selected';
+  applyBtn.disabled = applying || count === 0;
+}
+
+async function applySelected() {
+  const assignments = selectedAssignments();
+  if (!assignments.length || applying) return;
+  if (assignments.length > 50) {
+    alert('Select at most 50 products at a time.');
+    return;
+  }
+  if (!confirm('Apply ' + assignments.length + ' category assignment(s) in Lightspeed?')) return;
+  applying = true;
+  updateSelectedCount();
+  results.innerHTML = '<p><span class="spinner"></span>Applying selected assignments...</p>';
+  try {
+    const data = await jsonFetch('/category-manager/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assignments }),
+    });
+    const nameById = Object.fromEntries(assignments.map(a => [a.product_id, a.product_name]));
+    results.innerHTML = '<table><thead><tr><th>Product</th><th>Result</th></tr></thead><tbody>' +
+      (data.results || []).map(r => '<tr><td>' + escape(nameById[r.product_id] || r.product_id) + '</td><td>' +
+      (r.ok ? '<span class="ok-text">Updated to ' + escape(r.category) + '</span>' :
+              '<span class="bad-text">' + escape(r.error || 'Failed') + '</span>') +
+      '</td></tr>').join('') + '</tbody></table>';
+    searchProducts();
+  } catch (err) {
+    results.innerHTML = '<div class="error">' + escape(err.message) + '</div>';
+  } finally {
+    applying = false;
+    updateSelectedCount();
+  }
+}
+
+function clearResults() {
+  rows = [];
+  categories = [];
+  total = 0;
+  offset = 0;
+  productTable.innerHTML = '';
+  productStatus.textContent = 'Search returns up to 50 products at a time.';
+  updateSelectedCount();
+}
+
+async function jsonFetch(url, options) {
+  const resp = await fetch(url, options || {});
+  const text = await resp.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (err) { data = { detail: text }; }
+  if (!resp.ok) {
+    const detail = typeof data.detail === 'object' ? JSON.stringify(data.detail) : (data.detail || resp.statusText);
+    throw new Error(detail);
+  }
+  return data;
+}
+
+function escape(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+})[c]); }
+function escAttr(s) { return escape(s).replace(/"/g, '&quot;'); }
 </script>
 </body></html>"""
 

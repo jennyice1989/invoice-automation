@@ -1,0 +1,21 @@
+[
+  {"name": "Additives"},
+  {"name": "Medications"},
+  {"name": "Dosing Pumps & Accessories"},
+  {"name": "Aquariums"},
+  {"name": "Aquarium Parts & Accessories"},
+  {"name": "Tank Screens & Mats"},
+  {"name": "Cleaning", "children": ["Algae Magnets", "Algae Pads & Scrapers", "Cleaners & Polishes", "Cleaning Accessories", "Grabbers / Tongs", "Gravel Vacs"]},
+  {"name": "Fish Nets, Bags & Traps"},
+  {"name": "Decor", "children": ["Backgrounds", "Ornaments", "Fake Plants", "Live Plants", "Rock", "Substrate", "Wood"]},
+  {"name": "Electronics", "children": ["Accessories & Parts", "Chillers", "Controllers", "Fans", "Heaters", "Probes & Holders", "Timers"]},
+  {"name": "Filter Media", "children": ["Bags, Pads & Socks", "Filter Media"]},
+  {"name": "Filtration", "children": ["Accessories & Replacement Parts", "Filters", "Protein Skimmers", "Reactors", "Pond Filters", "Replacement Skimmer Pumps & Parts", "Reverse Osmosis", "UV Sterilizers"]},
+  {"name": "Food", "children": ["Coral", "Algae", "Feeders, Clips & Tools", "Flake", "Freeze Dried", "Frozen", "Pellet", "Pond", "Specialty"]},
+  {"name": "Lighting", "children": ["Bulbs", "LED Fixtures", "Mounting Hardware & Accessories", "T5 Fixtures"]},
+  {"name": "Plumbing", "children": ["PVC Fittings", "Ball Valves", "Bulkheads", "Cable Management", "Check Valves", "Float Valves", "Hose Clamps", "Insert Fittings", "Loc-Line", "Metric to Standard PVC Adapter", "Nipples", "Nylon Fittings", "Overflow Parts", "Suction Screens", "Tape", "Tubing & Pipe", "Uniseal", "Vivid Creative Aquatics"]},
+  {"name": "Pumps", "children": ["Accessories & Replacement Parts", "Air Pumps & Airstones", "Auto Top Off", "Circulation Pumps", "Water Pumps"]},
+  {"name": "Reef & Plant", "children": ["CO2 Equipment", "Coral Viewer", "Frag Racks & Plugs", "Glue & Epoxy", "Miscellaneous", "Planted Aquarium Supplies", "Reef Dips", "Tools"]},
+  {"name": "Reptile", "children": ["Aquatic Turtle Supplies", "Decorations", "Food & Water Bowls", "Heaters", "Hermit Crab Supplies", "Lighting", "Reptile Foods", "Substrates", "Terrarium Accessories", "Terrariums", "Timers, Gauges & Controllers", "Vitamins, Medications & Cleaners"]},
+  {"name": "Testing", "children": ["Calibration Solutions & Testing Accessories", "Hydrometers & Refractometers", "Test Kits", "Testing Equipment", "Thermometers"]}
+]

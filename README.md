@@ -16,6 +16,7 @@ and pushes a consignment to Lightspeed.
 - **Pricing review** — target margin, MSRP, and first-party retailer comparison notes; retail changes require approval before upload
 - **Product image upload** — after a drafted product is created, upload an approved JPG/PNG/WebP directly to Lightspeed
 - **Catalog audit** — reviews existing Lightspeed products for missing photos, weak descriptions, missing codes, and pricing below target
+- **Category manager** — creates the A2Z category taxonomy in Lightspeed and assigns existing products with reviewed suggestions
 - **Fish Label Maker** — searches live Lightspeed products, rechecks regular tax-exclusive retail prices, and generates DYMO 30334 fish label PDFs without changing Lightspeed
 - **Review screen** — split into "existing to update" and "uncertain"; one-click match, search, create-new, or skip
 - **Pushes to Lightspeed** — creates new products, updates costs, uploads approved retail changes, pushes consignment, optionally marks RECEIVED
@@ -80,6 +81,16 @@ products, flag missing photos, weak descriptions, missing codes, and retail
 prices below the `1.5x cost` target. You can draft copy with OpenAI, approve a
 price change, or upload an approved image. Nothing is changed in Lightspeed
 until you approve the specific action.
+
+**Manage categories.** Use Categories to preview the A2Z taxonomy, add missing
+categories to Lightspeed, sync the catalog cache, then search existing products
+and review suggested assignments. The app groups PVC elbows, tees, unions,
+couplings, and related fittings under `Plumbing / PVC Fittings`, flags live
+animals and replacement parts for review, and applies at most 50 selected
+category changes at a time. Before each assignment the app fetches the live
+product from Lightspeed, checks that the category has not changed since the
+preview, updates only `product_category_id`, verifies the readback, and records
+the outcome locally.
 
 **Print fish labels.** Use Fish labels to search live Lightspeed products by
 fish name, variety, sex, size, or SKU. Select the exact product yourself,
@@ -148,6 +159,7 @@ All require authentication via the session cookie except `/healthz`.
 - `GET /review/{id}` — review/finalize screen
 - `GET /audit` — existing catalog audit queue
 - `GET /enrich` — create products without an invoice
+- `GET /category-manager` — category setup and product assignment page
 - `GET /fish-labels` — Fish Label Maker page
 - `GET /settings` — pricing rules + MSRP upload
 - `POST /invoices/process` (multipart PDF) — upload + extract + match + price
@@ -167,6 +179,11 @@ All require authentication via the session cookie except `/healthz`.
 - `POST /audit/products/{id}/draft-description` — draft catalog copy with OpenAI
 - `POST /audit/products/{id}/apply` — upload approved audit changes
 - `POST /audit/products/{id}/image` — upload an approved product image
+- `GET /category-manager/preview` — preview missing/duplicate taxonomy categories
+- `POST /category-manager/create-missing` — create missing taxonomy categories in Lightspeed
+- `POST /category-manager/sync-catalog` — refresh local product cache before category review
+- `GET /category-manager/products?q=...` — search cached products with category suggestions
+- `POST /category-manager/apply` — apply up to 50 reviewed category assignments
 - `GET /outlets`, `GET /suppliers`
 - `GET /consignments/{id}`
 

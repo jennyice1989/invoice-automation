@@ -257,6 +257,80 @@ async def test_list_categories_walks_all_pages(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_list_categories_uses_2026_04_page_info_cursor(client_factory):
+    seen_after: list[str | None] = []
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        if after is None:
+            return httpx.Response(200, json={
+                "data": {"categories": [
+                    {"id": "c1", "name": "Plumbing"},
+                    {"id": "c2", "name": "PVC Fittings"},
+                ]},
+                "page_info": {"has_next": True, "last_seen": "cursor-1"},
+            })
+        if after == "cursor-1":
+            return httpx.Response(200, json={
+                "data": {"categories": [{"id": "c3", "name": "Check Valves"}]},
+                "page_info": {"has_next": False, "last_seen": "cursor-2"},
+            })
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    categories = await client.list_categories(page_size=2)
+
+    assert seen_paths == [
+        "/api/2026-04/product_categories",
+        "/api/2026-04/product_categories",
+    ]
+    assert seen_after == [None, "cursor-1"]
+    assert [c["id"] for c in categories] == ["c1", "c2", "c3"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_categories_rejects_non_advancing_page_info_cursor(client_factory):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": {"categories": [{"id": "c1", "name": "Plumbing"}]},
+            "page_info": {"has_next": True, "last_seen": request.url.params.get("after")},
+        })
+
+    client = client_factory(handler)
+    with pytest.raises(LightspeedError, match="pagination stopped advancing"):
+        await client.list_categories(page_size=1)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_categories_posts_2026_04_bulk_payload(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": {"categories": [{"id": "cat-1"}]}})
+
+    client = client_factory(handler)
+    result = await client.bulk_create_categories([
+        {"name": "Plumbing", "payload_id": "cat_plumbing"},
+    ])
+
+    assert captured == {
+        "method": "POST",
+        "path": "/api/2026-04/product_categories/bulk",
+        "body": {"categories": [{"name": "Plumbing", "payload_id": "cat_plumbing"}]},
+    }
+    assert result == [{"id": "cat-1"}]
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_create_brand_posts_name(client_factory):
     captured: dict[str, Any] = {}
 
@@ -519,6 +593,33 @@ async def test_patch_product_price_sends_nested_prices_payload(client_factory):
         "prices": {"price_excluding_tax": "29.99"},
     }
     assert product["id"] == "prod-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_product_category_sends_category_only_payload(client_factory):
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        calls.append((request.method, request.url.path, body))
+        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(200, json={
+                "data": {
+                    "id": "prod-1",
+                    "name": "PVC Elbow",
+                    "product_category_id": "cat-pvc",
+                },
+            })
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.update_product_category("prod-1", "cat-pvc")
+
+    assert calls == [
+        ("PUT", "/api/2.0/products/prod-1", {"product_category_id": "cat-pvc"}),
+    ]
+    assert product["product_category_id"] == "cat-pvc"
     await client.close()
 
 

@@ -41,8 +41,8 @@ from app.catalog import (
     upsert_cached_product,
 )
 from app.db import (
-    CatalogProduct, EnrichmentDraft, Invoice, InvoiceLine, LabelReprintQueue,
-    PricingRule,
+    CatalogProduct, CategoryAssignmentHistory, EnrichmentDraft, Invoice,
+    InvoiceLine, LabelReprintQueue, PricingRule,
     SupplierCatalogItem, SupplierMsrp, SupplierSkuMapping,
     find_existing_invoice, init_db, session_scope, upsert_mapping,
 )
@@ -62,6 +62,15 @@ from app.lightspeed import (
 from app.matching import MatchingService, RawInvoiceLine
 from app.price_updates import float_or_none, retail_update_decision
 from app.pricing import PricingResult, price_line
+from app.product_categories import (
+    assignable_paths,
+    bulk_create_payload,
+    category_full_path,
+    category_id_for_path,
+    category_setup_preview,
+    is_assignable_path,
+    suggest_category,
+)
 from app.retail_pricing import fetch_market_prices
 from app.supplier_catalog import (
     extract_pdf_text,
@@ -72,8 +81,8 @@ from app.supplier_catalog import (
 )
 from app.ui import (
     LOGIN_HTML, INDEX_HTML, HISTORY_HTML, REVIEW_HTML, SETTINGS_HTML,
-    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, FISH_LABELS_HTML,
-    API_COMMANDS_HTML,
+    ENRICH_HTML, ENRICH_REVIEW_HTML, ADMIN_HTML, AUDIT_HTML, CATEGORY_MANAGER_HTML,
+    FISH_LABELS_HTML, API_COMMANDS_HTML,
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
@@ -252,6 +261,13 @@ async def audit_page(request: Request):
     if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
         return redirect
     return HTMLResponse(AUDIT_HTML)
+
+
+@app.get("/category-manager", response_class=HTMLResponse)
+async def category_manager_page(request: Request):
+    if redirect := require_auth_html(request.cookies.get(COOKIE_NAME)):
+        return redirect
+    return HTMLResponse(CATEGORY_MANAGER_HTML)
 
 
 @app.get("/labels", response_class=HTMLResponse)
@@ -784,6 +800,252 @@ async def admin_delete_mapping(
 # --------------------------------------------------------------------- #
 # Catalog audit                                                         #
 # --------------------------------------------------------------------- #
+
+def _product_category_id(product: dict | None) -> str | None:
+    if not product:
+        return None
+    for key in ("product_category_id", "product_type_id", "category_id"):
+        value = product.get(key)
+        if value:
+            return str(value)
+    category = product.get("category") or product.get("product_category")
+    if isinstance(category, dict) and category.get("id"):
+        return str(category["id"])
+    return None
+
+
+def _product_category_name(product: dict | None) -> str | None:
+    if not product:
+        return None
+    for key in ("product_category_name", "category_name", "product_type_name"):
+        value = product.get(key)
+        if value:
+            return str(value)
+    category = product.get("category") or product.get("product_category")
+    if isinstance(category, dict):
+        return category_full_path(category)
+    return None
+
+
+def _cached_category_id(product: CatalogProduct) -> str | None:
+    raw = product.raw or {}
+    return _product_category_id(raw) if isinstance(raw, dict) else None
+
+
+def _variant_family_key(product: CatalogProduct) -> str | None:
+    raw = product.raw or {}
+    if not isinstance(raw, dict):
+        return None
+    for key in ("product_family_id", "variant_parent_id", "family_id"):
+        if raw.get(key):
+            return str(raw[key])
+    return None
+
+
+async def _category_product_row(session: AsyncSession, product: CatalogProduct) -> dict:
+    suggestion = suggest_category(product)
+    family_key = _variant_family_key(product)
+    family_members: list[dict] = []
+    if family_key:
+        rows = (await session.execute(
+            select(CatalogProduct).where(CatalogProduct.active.is_(True))
+        )).scalars().all()
+        for row in rows:
+            if row.lightspeed_product_id == product.lightspeed_product_id:
+                continue
+            if _variant_family_key(row) == family_key:
+                family_members.append({
+                    "id": row.lightspeed_product_id,
+                    "name": row.name,
+                    "category_name": row.category_name,
+                })
+    return {
+        "id": product.lightspeed_product_id,
+        "name": product.name,
+        "sku": product.sku,
+        "barcode": product.barcode,
+        "brand_name": product.brand_name,
+        "current_category": product.category_name,
+        "current_category_id": _cached_category_id(product),
+        "suggested_category": suggestion["path"],
+        "suggestion_confidence": suggestion["confidence"],
+        "suggestion_reason": suggestion["reason"],
+        "family_key": family_key,
+        "family_members": family_members[:8],
+        "requires_family_review": bool(family_members),
+    }
+
+
+class CategoryAssignmentItem(BaseModel):
+    product_id: str
+    category_path: str
+    preview_category_id: str | None = None
+
+
+class CategoryAssignmentRequest(BaseModel):
+    assignments: list[CategoryAssignmentItem] = Field(default_factory=list)
+
+
+def _history_row(
+    product_id: str,
+    product_name: str | None,
+    previous_id: str | None,
+    previous_name: str | None,
+    new_id: str | None,
+    new_name: str | None,
+    status: str,
+    outcome: str,
+) -> CategoryAssignmentHistory:
+    return CategoryAssignmentHistory(
+        lightspeed_product_id=product_id,
+        product_name=product_name,
+        previous_category_id=previous_id,
+        previous_category_name=previous_name,
+        new_category_id=new_id,
+        new_category_name=new_name,
+        status=status,
+        outcome=outcome,
+        created_at=datetime.utcnow(),
+    )
+
+
+@app.get("/category-manager/preview", dependencies=[Depends(require_auth)])
+async def preview_category_setup():
+    try:
+        categories = await _client().list_categories()
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return category_setup_preview(categories)
+
+
+@app.post("/category-manager/create-missing", dependencies=[Depends(require_auth)])
+async def create_missing_categories():
+    client = _client()
+    try:
+        categories = await client.list_categories()
+        preview = category_setup_preview(categories)
+        if preview["duplicates"]:
+            raise HTTPException(409, {
+                "message": "Duplicate existing category paths must be resolved in Lightspeed first.",
+                "duplicates": preview["duplicates"],
+            })
+        payload = bulk_create_payload(categories)
+        if payload:
+            await client.bulk_create_categories(payload)
+        refreshed = await client.list_categories()
+        verified = category_setup_preview(refreshed)
+    except HTTPException:
+        raise
+    except (LightspeedError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {
+        "ok": not bool(verified["missing"]),
+        "created": len(payload),
+        "remaining_missing": verified["missing"],
+        "duplicates": verified["duplicates"],
+    }
+
+
+@app.post("/category-manager/sync-catalog", dependencies=[Depends(require_auth)])
+async def category_manager_sync_catalog(session: AsyncSession = Depends(_session)):
+    try:
+        result = await sync_lightspeed_catalog(session, _client())
+    except LightspeedError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"ok": True, "product_count": result.total}
+
+
+@app.get("/category-manager/products", dependencies=[Depends(require_auth)])
+async def category_manager_products(
+    q: str = "",
+    offset: int = 0,
+    limit: int = 50,
+    session: AsyncSession = Depends(_session),
+):
+    limit = min(max(limit, 1), 50)
+    offset = max(offset, 0)
+    stmt = select(CatalogProduct).where(CatalogProduct.active.is_(True))
+    q = (q or "").strip()
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(or_(
+            func.lower(CatalogProduct.name).like(like),
+            func.lower(CatalogProduct.sku).like(like),
+            func.lower(CatalogProduct.barcode).like(like),
+            func.lower(CatalogProduct.supplier_code).like(like),
+        ))
+    total = (await session.execute(
+        select(func.count()).select_from(stmt.subquery())
+    )).scalar_one()
+    rows = (await session.execute(
+        stmt.order_by(CatalogProduct.name.asc()).offset(offset).limit(limit)
+    )).scalars().all()
+    categories = await _client().list_categories()
+    assignable = []
+    for path in assignable_paths():
+        category_id = category_id_for_path(categories, path)
+        if category_id:
+            assignable.append({"path": path, "id": category_id})
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "assignable_categories": assignable,
+        "data": [await _category_product_row(session, row) for row in rows],
+    }
+
+
+@app.post("/category-manager/apply", dependencies=[Depends(require_auth)])
+async def apply_category_assignments(
+    body: CategoryAssignmentRequest,
+    session: AsyncSession = Depends(_session),
+):
+    if not body.assignments:
+        raise HTTPException(400, "Select at least one product assignment")
+    if len(body.assignments) > 50:
+        raise HTTPException(400, "Apply at most 50 category assignments at a time")
+    client = _client()
+    categories = await client.list_categories()
+    results = []
+    for item in body.assignments:
+        product_id = item.product_id
+        new_id = category_id_for_path(categories, item.category_path)
+        if not new_id or not is_assignable_path(item.category_path):
+            outcome = "Selected category does not exist or is not assignable"
+            session.add(_history_row(product_id, None, None, None, new_id, item.category_path, "failed", outcome))
+            results.append({"product_id": product_id, "ok": False, "error": outcome})
+            continue
+        try:
+            live = await client.get_product(product_id)
+            previous_id = _product_category_id(live)
+            previous_name = _product_category_name(live)
+            if (item.preview_category_id or None) != (previous_id or None):
+                outcome = "Product category changed since preview; refresh before applying"
+                session.add(_history_row(product_id, live.get("name"), previous_id, previous_name, new_id, item.category_path, "stale", outcome))
+                results.append({"product_id": product_id, "ok": False, "stale": True, "error": outcome})
+                continue
+            updated = await client.update_product_category(product_id, new_id)
+            if not updated:
+                outcome = "Lightspeed could not update this product"
+                session.add(_history_row(product_id, live.get("name"), previous_id, previous_name, new_id, item.category_path, "failed", outcome))
+                results.append({"product_id": product_id, "ok": False, "error": outcome})
+                continue
+            verified = await client.get_product(product_id)
+            verified_id = _product_category_id(verified)
+            if verified_id and verified_id != new_id:
+                outcome = "Lightspeed readback did not show the requested category"
+                session.add(_history_row(product_id, live.get("name"), previous_id, previous_name, new_id, item.category_path, "failed", outcome))
+                results.append({"product_id": product_id, "ok": False, "error": outcome})
+                continue
+            await upsert_cached_product(session, verified)
+            session.add(_history_row(product_id, live.get("name"), previous_id, previous_name, new_id, item.category_path, "success", "Updated"))
+            results.append({"product_id": product_id, "ok": True, "category": item.category_path})
+        except LightspeedError as exc:
+            outcome = str(exc)
+            session.add(_history_row(product_id, None, None, None, new_id, item.category_path, "failed", outcome))
+            results.append({"product_id": product_id, "ok": False, "error": outcome})
+    await session.flush()
+    return {"ok": all(r.get("ok") for r in results), "results": results}
 
 @app.get("/audit/products", dependencies=[Depends(require_auth)])
 async def list_audit_products(

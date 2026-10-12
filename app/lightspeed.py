@@ -398,13 +398,21 @@ class LightspeedClient:
         """
         result = []
         seen_ids: set[str] = set()
-        after: int | None = None
-        for _ in range(max_pages):
+        after: str | None = None
+        for page in range(max_pages):
             params: dict[str, Any] = {"page_size": page_size}
             if after is not None:
                 params["after"] = after
-            data = await self._request("GET", "/product_categories", params=params)
-            raw = data.get("data", []) if isinstance(data, dict) else []
+            data = await self._request(
+                "GET", "/product_categories", params=params,
+                api_version="2026-04",
+            )
+            raw_container = data.get("data", []) if isinstance(data, dict) else []
+            raw = (
+                raw_container.get("categories", [])
+                if isinstance(raw_container, dict)
+                else raw_container
+            )
             if not isinstance(raw, list) or not raw:
                 break
             for item in raw:
@@ -420,16 +428,44 @@ class LightspeedClient:
                         "Skipping non-dict category item: %r (type %s)",
                         item, type(item).__name__,
                     )
+            page_info = data.get("page_info") if isinstance(data, dict) else None
+            if isinstance(page_info, dict):
+                next_after = page_info.get("last_seen")
+                has_next = bool(page_info.get("has_next"))
+                if not has_next:
+                    break
+                if not next_after or str(next_after) == str(after):
+                    raise LightspeedError(
+                        "Category pagination stopped advancing"
+                    )
+                after = str(next_after)
+                continue
+
             versions = [
                 int(item["version"]) for item in raw
                 if isinstance(item, dict)
                 and str(item.get("version", "")).isdigit()
             ]
-            next_after = max(versions) if versions else None
+            next_after = str(max(versions)) if versions else None
             if len(raw) < page_size or next_after is None or next_after == after:
                 break
             after = next_after
+        else:
+            raise LightspeedError(f"Category pagination exceeded {max_pages} pages")
         return result
+
+    async def bulk_create_categories(self, categories: list[dict]) -> list[dict]:
+        if not categories:
+            return []
+        data = await self._request(
+            "POST", "/product_categories/bulk",
+            json={"categories": categories},
+            api_version="2026-04",
+        )
+        raw = data.get("data", data) if isinstance(data, dict) else data
+        if isinstance(raw, dict):
+            raw = raw.get("categories", raw.get("data", []))
+        return raw if isinstance(raw, list) else []
 
     async def list_brands(self, *, page_size: int = 500) -> list[dict]:
         """Return all brands."""
@@ -986,6 +1022,35 @@ class LightspeedClient:
             return {"id": product_id, "_partial_update": {
                 "price_excluding_tax": float(retail_price),
             }}
+
+    async def update_product_category(
+        self,
+        product_id: str,
+        category_id: str,
+    ) -> dict | None:
+        """Update only a product's category using the app's current product API."""
+        try:
+            data = await self._request(
+                "PUT",
+                f"/products/{product_id}",
+                json={"product_category_id": category_id},
+            )
+        except LightspeedNotFoundError:
+            return None
+        if not data:
+            try:
+                return await self.get_product(product_id)
+            except LightspeedError:
+                return {"id": product_id, "_partial_update": {"product_category_id": category_id}}
+        product = self._unwrap_product_response(data, context="product category update")
+        if isinstance(product, dict):
+            return product
+        if isinstance(product, str) and _UUID_RE.match(product.strip()):
+            try:
+                return await self.get_product(product.strip())
+            except LightspeedError:
+                return {"id": product_id, "_partial_update": {"product_category_id": category_id}}
+        return await self.get_product(product_id)
 
     async def upload_product_image(
         self,

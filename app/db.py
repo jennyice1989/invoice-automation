@@ -127,6 +127,23 @@ class LabelReprintQueue(Base):
     printed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class CategoryAssignmentHistory(Base):
+    """Audit trail for category changes made by the app."""
+
+    __tablename__ = "category_assignment_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lightspeed_product_id: Mapped[str] = mapped_column(String(64), index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    previous_category_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    previous_category_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    new_category_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    new_category_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="success", index=True)
+    outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class SupplierCatalogItem(Base):
     """Supplier item memory, including products that are not in Lightspeed yet."""
 
@@ -448,6 +465,18 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS ix_label_reprint_status ON label_reprint_queue(status)",
             "CREATE INDEX IF NOT EXISTS ix_label_reprint_created_at ON label_reprint_queue(created_at)",
             "CREATE INDEX IF NOT EXISTS ix_label_reprint_product_id ON label_reprint_queue(lightspeed_product_id)",
+            "CREATE TABLE IF NOT EXISTS category_assignment_history (id SERIAL PRIMARY KEY)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS lightspeed_product_id VARCHAR(64)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS product_name VARCHAR(500)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS previous_category_id VARCHAR(64)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS previous_category_name VARCHAR(500)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS new_category_id VARCHAR(64)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS new_category_name VARCHAR(500)",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'success'",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS outcome TEXT",
+            "ALTER TABLE category_assignment_history ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+            "CREATE INDEX IF NOT EXISTS ix_category_assignment_history_product_id ON category_assignment_history(lightspeed_product_id)",
+            "CREATE INDEX IF NOT EXISTS ix_category_assignment_history_created_at ON category_assignment_history(created_at)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_id VARCHAR(64)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(500)",
             "ALTER TABLE supplier_catalog_items ADD COLUMN IF NOT EXISTS supplier_code VARCHAR(255)",
