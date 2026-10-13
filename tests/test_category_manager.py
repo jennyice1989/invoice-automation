@@ -4,6 +4,8 @@ import pytest
 
 from app import main
 from app.db import CatalogProduct
+from app.lightspeed import LightspeedError
+from app.product_categories import taxonomy_nodes
 
 
 class FakeSession:
@@ -54,6 +56,49 @@ class FakeCategoryClient:
     async def update_product_category(self, product_id, category_id):
         self.update_calls.append((product_id, category_id))
         return self.updates.get(product_id)
+
+
+class DuplicateCreateClient:
+    def __init__(self):
+        self.list_calls = 0
+        self.bulk_payload = None
+
+    async def list_categories(self):
+        self.list_calls += 1
+        if self.list_calls == 1:
+            return []
+        return [
+            {
+                "id": f"cat-{node.path}",
+                "name": node.name,
+                "category_path": node.path,
+            }
+            for node in taxonomy_nodes()
+        ]
+
+    async def bulk_create_categories(self, payload):
+        self.bulk_payload = payload
+        raise LightspeedError(
+            'POST /product_categories/bulk failed (422): { "error": '
+            '"Category already exists", "fields": { "category_path": '
+            '"Lighting", "error_code": "duplicate_name", "payload_id": "" } }'
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_missing_categories_recovers_from_duplicate_name(monkeypatch):
+    client = DuplicateCreateClient()
+    monkeypatch.setattr(main, "_client", lambda: client)
+
+    result = await main.create_missing_categories()
+
+    assert result["ok"] is True
+    assert result["duplicate_conflict"] is True
+    assert result["created"] == 0
+    assert result["attempted"] == 110
+    assert result["remaining_missing"] == []
+    assert client.bulk_payload[0]["name"] == "Additives"
+    assert client.list_calls == 2
 
 
 @pytest.mark.asyncio

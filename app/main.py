@@ -942,6 +942,8 @@ async def preview_category_setup():
 @app.post("/category-manager/create-missing", dependencies=[Depends(require_auth)])
 async def create_missing_categories():
     client = _client()
+    duplicate_conflict = False
+    payload = []
     try:
         categories = await client.list_categories()
         preview = category_setup_preview(categories)
@@ -952,7 +954,16 @@ async def create_missing_categories():
             })
         payload = bulk_create_payload(categories)
         if payload:
-            await client.bulk_create_categories(payload)
+            try:
+                await client.bulk_create_categories(payload)
+            except LightspeedError as exc:
+                message = str(exc)
+                if (
+                    "duplicate_name" not in message
+                    and "Category already exists" not in message
+                ):
+                    raise
+                duplicate_conflict = True
         refreshed = await client.list_categories()
         verified = category_setup_preview(refreshed)
     except HTTPException:
@@ -961,7 +972,9 @@ async def create_missing_categories():
         raise HTTPException(502, str(exc)) from exc
     return {
         "ok": not bool(verified["missing"]),
-        "created": len(payload),
+        "created": 0 if duplicate_conflict else len(payload),
+        "attempted": len(payload),
+        "duplicate_conflict": duplicate_conflict,
         "remaining_missing": verified["missing"],
         "duplicates": verified["duplicates"],
     }

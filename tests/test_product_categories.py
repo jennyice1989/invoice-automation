@@ -5,6 +5,7 @@ import pytest
 from app.product_categories import (
     assignable_paths,
     bulk_create_payload,
+    category_full_path,
     category_id_for_path,
     category_setup_preview,
     suggest_category,
@@ -49,6 +50,16 @@ def test_category_matching_uses_full_hierarchical_path():
 
     assert category_id_for_path(categories, "Cleaning / Algae Pads & Scrapers") == "pads"
     assert category_id_for_path(categories, "Food / Algae Pads & Scrapers") == "food-pads"
+
+
+def test_category_matching_accepts_string_category_path():
+    category = {"id": "lighting", "name": "Ignored Fallback", "category_path": "Lighting"}
+
+    assert category_full_path(category) == "Lighting"
+    assert category_id_for_path([category], "Lighting") == "lighting"
+    assert "Lighting" not in {
+        item["path"] for item in category_setup_preview([category])["missing"]
+    }
 
 
 def test_duplicate_category_paths_block_matching():

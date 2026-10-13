@@ -69,6 +69,8 @@ def assignable_paths(taxonomy: list[dict] | None = None) -> list[str]:
 
 def category_full_path(category: dict) -> str:
     path = category.get("category_path") or category.get("path")
+    if isinstance(path, str) and path.strip():
+        return path.strip()
     if isinstance(path, list) and path:
         names = []
         for item in path:
