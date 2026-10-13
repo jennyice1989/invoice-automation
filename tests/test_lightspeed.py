@@ -421,7 +421,7 @@ async def test_create_product_accepts_data_list_response(client_factory):
     assert captured["body"]["name"] == "New Product"
     assert captured["body"]["sku"] == "SKU-1"
     assert captured["body"]["supplier_code"] == "SUP-1"
-    assert captured["body"]["has_inventory"] is True
+    assert "has_inventory" not in captured["body"]
     assert product["id"] == "prod-1"
     await client.close()
 
@@ -471,7 +471,12 @@ async def test_create_product_enforces_inventory_tracking_after_create(client_fa
                 "name": "New Product",
                 "has_inventory": False,
             }})
-        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
+        if (
+            request.method == "PUT"
+            and request.url.path == "/api/2.1/products/prod-1"
+        ):
+            return httpx.Response(200, json={})
+        if request.method == "GET" and request.url.path.endswith("/products/prod-1"):
             return httpx.Response(200, json={"data": {
                 "id": "prod-1",
                 "name": "New Product",
@@ -485,12 +490,17 @@ async def test_create_product_enforces_inventory_tracking_after_create(client_fa
     assert calls[0] == (
         "POST",
         "/api/2.0/products",
-        {"name": "New Product", "has_inventory": True},
+        {"name": "New Product"},
     )
     assert calls[1] == (
         "PUT",
+        "/api/2.1/products/prod-1",
+        {"common": {"track_inventory": True}},
+    )
+    assert calls[2] == (
+        "GET",
         "/api/2.0/products/prod-1",
-        {"has_inventory": True},
+        {},
     )
     assert product["has_inventory"] is True
     await client.close()
@@ -625,17 +635,18 @@ async def test_update_product_category_sends_category_only_payload(client_factor
 
 @pytest.mark.asyncio
 async def test_update_product_can_enable_inventory_tracking(client_factory):
-    captured: dict = {}
+    calls: list[tuple[str, str, dict]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "PUT" and request.url.path.endswith("/products/prod-1"):
-            captured["body"] = json.loads(request.content.decode())
-            return httpx.Response(200, json={
-                "data": {
-                    "id": "prod-1",
-                    "has_inventory": True,
-                },
-            })
+        body = json.loads(request.content.decode()) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.method == "PUT" and request.url.path == "/api/2.1/products/prod-1":
+            return httpx.Response(200, json={})
+        if request.method == "GET" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "has_inventory": True,
+            }})
         return httpx.Response(404)
 
     client = client_factory(handler)
@@ -644,7 +655,10 @@ async def test_update_product_can_enable_inventory_tracking(client_factory):
         has_inventory=True,
     )
 
-    assert captured["body"]["has_inventory"] is True
+    assert calls == [
+        ("PUT", "/api/2.1/products/prod-1", {"common": {"track_inventory": True}}),
+        ("GET", "/api/2.0/products/prod-1", {}),
+    ]
     assert product["has_inventory"] is True
     await client.close()
 

@@ -838,7 +838,7 @@ class LightspeedClient:
         has_inventory: bool = True,
     ) -> dict:
         """Create a product in Lightspeed. Returns the new product dict."""
-        payload: dict[str, Any] = {"name": name, "has_inventory": has_inventory}
+        payload: dict[str, Any] = {"name": name}
         if sku:
             payload["sku"] = sku
         if supplier_id:
@@ -892,7 +892,9 @@ class LightspeedClient:
         if not product_id:
             return product
         try:
-            updated = await self.update_product(product_id, has_inventory=True)
+            updated = await self.set_product_inventory_tracking(
+                product_id, enabled=True
+            )
             return updated or product
         except LightspeedError as exc:
             logger.warning(
@@ -928,8 +930,6 @@ class LightspeedClient:
             payload["price_excluding_tax"] = retail_price
         if supply_price is not None:
             payload["supply_price"] = supply_price
-        if has_inventory is not None:
-            payload["has_inventory"] = has_inventory
         if sku is not None:
             payload["sku"] = sku
         if barcode is not None:
@@ -939,41 +939,92 @@ class LightspeedClient:
         if description is not None:
             payload["description"] = description
 
-        if not payload:
-            return None
+        product: dict | None = None
 
+        if payload:
+            try:
+                data = await self._request(
+                    "PUT", f"/products/{product_id}", json=payload
+                )
+            except LightspeedNotFoundError:
+                logger.warning(
+                    "Skipping update for product %s (404 — likely deleted)",
+                    product_id,
+                )
+                return None
+            if not data:
+                try:
+                    product = await self.get_product(product_id)
+                except LightspeedError:
+                    logger.info(
+                        "Product %s update returned no body and refetch failed; "
+                        "treating the accepted update as partial success",
+                        product_id,
+                    )
+                    product = {"id": product_id, "_partial_update": payload}
+            else:
+                unwrapped = self._unwrap_product_response(
+                    data, context="product update"
+                )
+                if isinstance(unwrapped, dict):
+                    product = unwrapped
+                elif _UUID_RE.match(unwrapped.strip()):
+                    try:
+                        product = await self.get_product(unwrapped.strip())
+                    except LightspeedError:
+                        product = {"id": product_id, "_partial_update": payload}
+                else:
+                    try:
+                        product = await self.get_product(product_id)
+                    except LightspeedError:
+                        product = {"id": product_id, "_partial_update": payload}
+
+        if has_inventory is not None:
+            tracked = await self.set_product_inventory_tracking(
+                product_id, enabled=has_inventory
+            )
+            return tracked or product
+        return product
+
+    async def set_product_inventory_tracking(
+        self,
+        product_id: str,
+        *,
+        enabled: bool = True,
+    ) -> dict | None:
+        """Enable/disable inventory tracking using the 2.1 product shape."""
+        payload = {"common": {"track_inventory": enabled}}
         try:
             data = await self._request(
-                "PUT", f"/products/{product_id}", json=payload
+                "PUT", f"/products/{product_id}", json=payload,
+                api_version="2.1",
             )
         except LightspeedNotFoundError:
             logger.warning(
-                "Skipping update for product %s (404 — likely deleted)",
+                "Skipping inventory tracking update for product %s (404)",
                 product_id,
             )
             return None
-        if not data:
+        if data:
             try:
-                return await self.get_product(product_id)
-            except LightspeedError:
-                logger.info(
-                    "Product %s update returned no body and refetch failed; "
-                    "treating the accepted update as partial success",
-                    product_id,
+                product = self._unwrap_product_response(
+                    data, context="product inventory tracking update"
                 )
-                return {"id": product_id, "_partial_update": payload}
-        product = self._unwrap_product_response(data, context="product update")
-        if isinstance(product, dict):
-            return product
-        if _UUID_RE.match(product.strip()):
-            try:
-                return await self.get_product(product.strip())
+                if isinstance(product, dict) and product.get("id"):
+                    return product
             except LightspeedError:
-                return {"id": product_id, "_partial_update": payload}
+                pass
         try:
-            return await self.get_product(product_id)
+            fetched = await self.get_product(product_id)
+            if isinstance(fetched, dict):
+                fetched.setdefault("has_inventory", enabled)
+            return fetched
         except LightspeedError:
-            return {"id": product_id, "_partial_update": payload}
+            return {
+                "id": product_id,
+                "_partial_update": {"has_inventory": enabled},
+                "has_inventory": enabled,
+            }
 
     async def patch_product_price(
         self,
