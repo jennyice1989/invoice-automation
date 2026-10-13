@@ -836,6 +836,7 @@ class LightspeedClient:
         category_id: str | None = None,
         tag_ids: list[str] | None = None,
         has_inventory: bool = True,
+        inventory_outlet_id: str | None = None,
     ) -> dict:
         """Create a product in Lightspeed. Returns the new product dict."""
         payload: dict[str, Any] = {"name": name}
@@ -860,6 +861,11 @@ class LightspeedClient:
             payload["product_category_id"] = category_id
         if tag_ids:
             payload["tag_ids"] = tag_ids
+        if has_inventory and inventory_outlet_id:
+            payload["inventory"] = [{
+                "outlet_id": inventory_outlet_id,
+                "current_amount": 0,
+            }]
 
         data = await self._request("POST", "/products", json=payload)
         # POST /products may return {"data": [{...product...}]}, a single
@@ -868,11 +874,13 @@ class LightspeedClient:
         if isinstance(inner, dict):
             return await self._ensure_product_inventory_tracking(
                 inner, requested=has_inventory,
+                inventory_outlet_id=inventory_outlet_id,
             )
         if _UUID_RE.match(inner.strip()):
             product = await self.get_product(inner.strip())
             return await self._ensure_product_inventory_tracking(
                 product, requested=has_inventory,
+                inventory_outlet_id=inventory_outlet_id,
             )
         raise LightspeedError(
             "Unexpected Lightspeed response during product create: "
@@ -884,6 +892,7 @@ class LightspeedClient:
         product: dict,
         *,
         requested: bool,
+        inventory_outlet_id: str | None = None,
     ) -> dict:
         """Make product creation defensive when create ignores has_inventory."""
         if not requested or product.get("has_inventory") is True:
@@ -893,7 +902,8 @@ class LightspeedClient:
             return product
         try:
             updated = await self.set_product_inventory_tracking(
-                product_id, enabled=True
+                product_id, enabled=True,
+                inventory_outlet_id=inventory_outlet_id,
             )
             return updated or product
         except LightspeedError as exc:
@@ -918,6 +928,7 @@ class LightspeedClient:
         barcode: str | None = None,
         supplier_code: str | None = None,
         description: str | None = None,
+        inventory_outlet_id: str | None = None,
     ) -> dict | None:
         """Update select fields on an existing product.
 
@@ -981,7 +992,8 @@ class LightspeedClient:
 
         if has_inventory is not None:
             tracked = await self.set_product_inventory_tracking(
-                product_id, enabled=has_inventory
+                product_id, enabled=has_inventory,
+                inventory_outlet_id=inventory_outlet_id,
             )
             return tracked or product
         return product
@@ -991,9 +1003,15 @@ class LightspeedClient:
         product_id: str,
         *,
         enabled: bool = True,
+        inventory_outlet_id: str | None = None,
     ) -> dict | None:
         """Enable/disable inventory tracking using the 2.1 product shape."""
         payload = {"common": {"track_inventory": enabled}}
+        if enabled and inventory_outlet_id:
+            payload["details"] = {"inventory": [{
+                "outlet_id": inventory_outlet_id,
+                "current_amount": 0,
+            }]}
         try:
             data = await self._request(
                 "PUT", f"/products/{product_id}", json=payload,

@@ -827,6 +827,27 @@ def _product_category_name(product: dict | None) -> str | None:
     return None
 
 
+def _product_tracks_inventory(product: dict | CatalogProduct | None) -> bool | None:
+    if not product:
+        return None
+    if isinstance(product, CatalogProduct):
+        if product.has_inventory is not None:
+            return product.has_inventory
+        raw = product.raw or {}
+    else:
+        raw = product
+    if not isinstance(raw, dict):
+        return None
+    if "has_inventory" in raw:
+        return bool(raw.get("has_inventory"))
+    common = raw.get("common")
+    if isinstance(common, dict) and "track_inventory" in common:
+        return bool(common.get("track_inventory"))
+    if "track_inventory" in raw:
+        return bool(raw.get("track_inventory"))
+    return None
+
+
 def _cached_category_id(product: CatalogProduct) -> str | None:
     raw = product.raw or {}
     return _product_category_id(raw) if isinstance(raw, dict) else None
@@ -1204,6 +1225,7 @@ async def _apply_audit_product_update(
 
     if body.enable_inventory_tracking:
         update["has_inventory"] = True
+        update["inventory_outlet_id"] = await _outlet_id_for_client(_client())
 
     if body.approve_sku:
         custom_sku = (body.custom_sku or "").strip() or custom_sku_for_product(product)
@@ -2003,6 +2025,8 @@ async def finalize_invoice(
                     upd["supply_price"] = landed_cost
                 if body.track_inventory_for_products:
                     upd["has_inventory"] = True
+                    if _product_tracks_inventory(product) is False:
+                        upd["inventory_outlet_id"] = outlet_id
                 result = await client.update_product(m["product_id"], **upd)
                 if result is None:
                     # Update was skipped (e.g., 404) — note it but proceed.
@@ -2096,6 +2120,8 @@ async def finalize_invoice(
                             upd["retail_price"] = dec.retail_price_override
                     if body.track_inventory_for_products:
                         upd["has_inventory"] = True
+                        if _product_tracks_inventory(product) is False:
+                            upd["inventory_outlet_id"] = outlet_id
                     result = await client.update_product(
                         dec.lightspeed_product_id, **upd
                     )
@@ -2155,6 +2181,9 @@ async def finalize_invoice(
                     supply_price=landed_cost,
                     retail_price=dec.new_retail_price,
                     has_inventory=body.track_inventory_for_products,
+                    inventory_outlet_id=(
+                        outlet_id if body.track_inventory_for_products else None
+                    ),
                 )
                 new_id = created.get("id")
                 if not new_id:
@@ -3383,6 +3412,7 @@ async def create_from_draft(
             logger.warning("Brand resolve failed: %s", exc)
 
     try:
+        outlet_id = await _outlet_id_for_client(client)
         created = await client.create_product(
             name=name,
             sku=draft.sku,
@@ -3394,6 +3424,7 @@ async def create_from_draft(
             description=draft.description,
             brand_id=brand_id,
             category_id=category_id,
+            inventory_outlet_id=outlet_id,
         )
     except LightspeedError as exc:
         # Surface the full Lightspeed error message — it usually

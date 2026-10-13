@@ -507,6 +507,35 @@ async def test_create_product_enforces_inventory_tracking_after_create(client_fa
 
 
 @pytest.mark.asyncio
+async def test_create_product_includes_initial_outlet_inventory_record(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/products"):
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "name": "New Product",
+                "has_inventory": True,
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.create_product(
+        name="New Product",
+        has_inventory=True,
+        inventory_outlet_id="out-1",
+    )
+
+    assert captured["body"]["inventory"] == [{
+        "outlet_id": "out-1",
+        "current_amount": 0,
+    }]
+    assert product["id"] == "prod-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_create_product_reports_unexpected_string_response(client_factory):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": "missing required field"})
@@ -659,6 +688,39 @@ async def test_update_product_can_enable_inventory_tracking(client_factory):
         ("PUT", "/api/2.1/products/prod-1", {"common": {"track_inventory": True}}),
         ("GET", "/api/2.0/products/prod-1", {}),
     ]
+    assert product["has_inventory"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_update_product_can_enable_tracking_with_outlet_inventory_record(client_factory):
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT" and request.url.path == "/api/2.1/products/prod-1":
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={})
+        if request.method == "GET" and request.url.path.endswith("/products/prod-1"):
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "has_inventory": True,
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.update_product(
+        "prod-1",
+        has_inventory=True,
+        inventory_outlet_id="out-1",
+    )
+
+    assert captured["body"] == {
+        "common": {"track_inventory": True},
+        "details": {"inventory": [{
+            "outlet_id": "out-1",
+            "current_amount": 0,
+        }]},
+    }
     assert product["has_inventory"] is True
     await client.close()
 
