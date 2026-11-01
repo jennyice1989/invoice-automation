@@ -841,7 +841,12 @@ class LightspeedClient:
         """Create a product in Lightspeed. Returns the new product dict."""
         payload: dict[str, Any] = {"name": name}
         if sku:
+            # Lightspeed's current product model represents the visible SKU as
+            # the first CUSTOM product code.  Keep the legacy top-level field
+            # for the 2.0 create endpoint, but also send the canonical code so
+            # the value is persisted in the SKU Codes section of the product.
             payload["sku"] = sku
+            payload["product_codes"] = [{"type": "CUSTOM", "code": sku}]
         if supplier_id:
             payload["supplier_id"] = supplier_id
         if supplier_code:

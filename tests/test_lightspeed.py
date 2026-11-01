@@ -420,6 +420,9 @@ async def test_create_product_accepts_data_list_response(client_factory):
 
     assert captured["body"]["name"] == "New Product"
     assert captured["body"]["sku"] == "SKU-1"
+    assert captured["body"]["product_codes"] == [
+        {"type": "CUSTOM", "code": "SKU-1"},
+    ]
     assert captured["body"]["supplier_code"] == "SUP-1"
     assert "has_inventory" not in captured["body"]
     assert product["id"] == "prod-1"
