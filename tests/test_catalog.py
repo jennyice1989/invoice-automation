@@ -39,6 +39,20 @@ def test_product_to_cache_fields_reads_alternate_barcode_shapes():
     assert product_barcode_value({"upc": "000116768702"}) == "000116768702"
 
 
+def test_product_to_cache_fields_does_not_treat_custom_sku_as_barcode():
+    product = {
+        "id": "prod-1",
+        "name": "Test Product",
+        "sku": "10558",
+        "product_codes": [{"type": "CUSTOM", "code": "10558"}],
+    }
+
+    assert product_barcode_value(product) is None
+    fields = product_to_cache_fields(product, datetime(2026, 1, 1))
+    assert fields["sku"] == "10558"
+    assert fields["barcode"] is None
+
+
 def test_search_score_prefers_specific_match():
     query = "Seachem Aquavitro Shrimp Tube"
     good = {

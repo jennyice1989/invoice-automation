@@ -86,9 +86,19 @@ def _product_barcode_values(product: dict) -> list[str]:
     out: list[str] = []
     for key in (
         "barcode", "barcodes", "upc", "ean", "gtin", "product_code",
-        "product_codes", "codes",
     ):
         out.extend(_barcode_values(product.get(key)))
+    for key in ("product_codes", "codes"):
+        codes = product.get(key)
+        if not isinstance(codes, list):
+            continue
+        for item in codes:
+            if not isinstance(item, dict):
+                continue
+            code_type = str(item.get("type") or "").strip().upper()
+            if code_type not in {"UPC", "EAN", "ISBN", "ITF", "JAN", "GTIN"}:
+                continue
+            out.extend(_barcode_values(item.get("code")))
     return out
 
 
@@ -1002,6 +1012,68 @@ class LightspeedClient:
             )
             return tracked or product
         return product
+
+    async def replace_product_sku_code(
+        self,
+        product_id: str,
+        sku: str,
+        *,
+        previous_sku: str | None = None,
+    ) -> dict:
+        """Replace a generated/missing SKU while preserving real barcodes.
+
+        The 2026-10 API treats ``codes`` as a replace-all collection, so the
+        current collection must be read first.  Only the previous SKU is
+        removed; UPC/EAN and other distinct codes remain attached.
+        """
+        sku = (sku or "").strip()
+        if not sku:
+            raise ValueError("sku is required")
+
+        data = await self._request(
+            "GET", f"/products/{product_id}", api_version="2026-10"
+        )
+        current = self._unwrap_product_response(data, context="get product codes")
+        if not isinstance(current, dict):
+            raise LightspeedError(
+                "Unexpected Lightspeed response while reading product codes"
+            )
+
+        old_sku = (previous_sku or current.get("sku") or "").strip()
+        raw_codes = current.get("codes") or current.get("product_codes") or []
+        preserved: list[dict[str, str]] = []
+        seen = {sku.casefold()}
+        if isinstance(raw_codes, list):
+            for item in raw_codes:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code") or "").strip()
+                code_type = str(item.get("type") or "").strip().upper()
+                if not code or not code_type:
+                    continue
+                if old_sku and code.casefold() == old_sku.casefold():
+                    continue
+                folded = code.casefold()
+                if folded in seen:
+                    continue
+                seen.add(folded)
+                preserved.append({"type": code_type, "code": code})
+
+        codes = [{"type": "CUSTOM", "code": sku}, *preserved]
+        await self._request(
+            "PATCH",
+            f"/products/{product_id}",
+            json={"codes": codes},
+            api_version="2026-10",
+        )
+        try:
+            return await self.get_product(product_id)
+        except LightspeedError:
+            updated = dict(current)
+            updated["sku"] = sku
+            updated["codes"] = codes
+            updated["product_codes"] = codes
+            return updated
 
     async def set_product_inventory_tracking(
         self,

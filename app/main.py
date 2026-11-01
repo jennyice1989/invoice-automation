@@ -617,10 +617,10 @@ async def update_generated_sku(
         raise HTTPException(400, "Product does not have a generated/internal SKU")
 
     try:
-        updated = await _client().update_product(
+        updated = await _client().replace_product_sku_code(
             product_id,
-            sku=real_sku,
-            barcode=real_sku,
+            real_sku,
+            previous_sku=product.sku,
         )
     except LightspeedError as exc:
         raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
@@ -629,9 +629,8 @@ async def update_generated_sku(
     partial_update = updated.get("_partial_update") if isinstance(updated, dict) else None
     if partial_update:
         product.sku = real_sku
-        product.barcode = real_sku
         raw = dict(product.raw or {})
-        raw.update({"sku": real_sku, "barcode": real_sku})
+        raw.update({"sku": real_sku})
         product.raw = raw
         product.updated_at = datetime.utcnow()
     else:
@@ -1217,6 +1216,7 @@ async def _apply_audit_product_update(
         raise HTTPException(404, "Product not found in local catalog cache")
 
     update: dict = {}
+    sku_code_replacement: str | None = None
     if body.approve_price:
         price = body.retail_price
         if price is None:
@@ -1245,30 +1245,48 @@ async def _apply_audit_product_update(
         if not custom_sku:
             raise HTTPException(400, "Approved SKU is empty")
         if product.sku and product.sku.strip():
-            raise HTTPException(400, "Product already has a SKU")
-        update["sku"] = custom_sku
+            if not is_generated_sku(product.sku, product.barcode):
+                raise HTTPException(400, "Product already has a SKU")
+        sku_code_replacement = custom_sku
 
     if body.approve_barcode_sku:
         barcode_sku = (body.barcode_sku or "").strip()
         if not barcode_sku:
             raise HTTPException(400, "Approved barcode/SKU is empty")
-        update["sku"] = barcode_sku
-        update["barcode"] = barcode_sku
+        if is_generated_sku(product.sku, product.barcode):
+            sku_code_replacement = barcode_sku
+        else:
+            update["sku"] = barcode_sku
+            update["barcode"] = barcode_sku
 
-    if not update:
+    if not update and not sku_code_replacement:
         raise HTTPException(400, "Nothing approved to update")
 
     old_retail_price = product.retail_price
     approved_retail_price = update.get("retail_price")
     try:
         client = _client()
-        updated = await client.update_product(product_id, **update)
+        updated = await client.update_product(product_id, **update) if update else None
+        if (not update or updated) and sku_code_replacement:
+            updated = await client.replace_product_sku_code(
+                product_id,
+                sku_code_replacement,
+                previous_sku=product.sku,
+            )
         if not updated:
             live_product = await _find_live_audit_product(client, session, product)
             if live_product and live_product.lightspeed_product_id != product_id:
                 product = live_product
                 product_id = live_product.lightspeed_product_id
-                updated = await client.update_product(product_id, **update)
+                updated = await client.update_product(product_id, **update) if update else None
+                if (not update or updated) and sku_code_replacement:
+                    updated = await client.replace_product_sku_code(
+                        product_id,
+                        sku_code_replacement,
+                        previous_sku=product.sku,
+                    )
+    except LightspeedNotFoundError:
+        updated = None
     except LightspeedError as exc:
         raise HTTPException(502, f"Lightspeed update failed: {exc}") from exc
     if not updated:

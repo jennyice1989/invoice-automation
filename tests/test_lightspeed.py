@@ -610,6 +610,53 @@ async def test_update_product_sends_sku_and_barcode(client_factory):
 
 
 @pytest.mark.asyncio
+async def test_replace_product_sku_code_preserves_real_barcodes(client_factory):
+    calls: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path == "/api/2026-10/products/prod-1":
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "sku": "10558",
+                "codes": [
+                    {"id": "old", "type": "CUSTOM", "code": "10558"},
+                    {"id": "upc", "type": "UPC", "code": "842982025202"},
+                ],
+            }})
+        if request.method == "PATCH" and request.url.path == "/api/2026-10/products/prod-1":
+            return httpx.Response(200, json={"data": {"id": "prod-1"}})
+        if request.method == "GET" and request.url.path == "/api/2.0/products/prod-1":
+            return httpx.Response(200, json={"data": {
+                "id": "prod-1",
+                "name": "Test Product",
+                "sku": "SUP-11811",
+                "product_codes": [
+                    {"type": "CUSTOM", "code": "SUP-11811"},
+                    {"type": "UPC", "code": "842982025202"},
+                ],
+            }})
+        return httpx.Response(404)
+
+    client = client_factory(handler)
+    product = await client.replace_product_sku_code(
+        "prod-1", "SUP-11811", previous_sku="10558"
+    )
+
+    assert calls[1] == (
+        "PATCH",
+        "/api/2026-10/products/prod-1",
+        {"codes": [
+            {"type": "CUSTOM", "code": "SUP-11811"},
+            {"type": "UPC", "code": "842982025202"},
+        ]},
+    )
+    assert product["sku"] == "SUP-11811"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_patch_product_price_sends_nested_prices_payload(client_factory):
     captured: dict = {}
 

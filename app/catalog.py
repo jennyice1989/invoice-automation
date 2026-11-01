@@ -57,11 +57,23 @@ def product_barcode_value(product: dict) -> str | None:
     """Return the first barcode/UPC value across common Lightspeed shapes."""
     for key in (
         "barcode", "barcodes", "upc", "ean", "gtin", "product_code",
-        "product_codes", "codes",
     ):
         barcode = _barcode_value(product.get(key))
         if barcode:
             return barcode
+    for key in ("product_codes", "codes"):
+        codes = product.get(key)
+        if not isinstance(codes, list):
+            continue
+        for item in codes:
+            if not isinstance(item, dict):
+                continue
+            code_type = str(item.get("type") or "").strip().upper()
+            if code_type not in {"UPC", "EAN", "ISBN", "ITF", "JAN", "GTIN"}:
+                continue
+            barcode = _barcode_value(item.get("code"))
+            if barcode:
+                return barcode
     return None
 
 

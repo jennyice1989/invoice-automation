@@ -136,6 +136,7 @@ def test_audit_flags_short_numeric_sku_as_generated():
 def test_sku_looks_like_barcode_for_real_barcode_lengths():
     assert sku_looks_like_barcode("000116768702")
     assert is_generated_sku("10558") is True
+    assert is_generated_sku("10558", "10558") is True
     assert is_generated_sku("000116768702") is False
 
 
