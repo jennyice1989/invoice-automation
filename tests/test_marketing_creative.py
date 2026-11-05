@@ -76,3 +76,24 @@ def test_fallback_graphic_is_not_a_photo_substitute():
     from app.marketing_templates import render_template
     payload = render_template("Aquarium Water Testing 101", "education", "portrait")
     assert len(payload) > 8000
+
+
+def test_four_poster_variants_are_distinct():
+    from app.marketing_designs import render
+    from PIL import ImageChops
+    designs=[]
+    for n in range(4):
+        data=render("Choosing an Aquarium Setup", "education", "portrait", n)
+        image=Image.open(io.BytesIO(data))
+        assert image.size == (1080,1350)
+        designs.append(image.copy())
+    for n in range(1,4):
+        assert ImageChops.difference(designs[0],designs[n]).getbbox() is not None
+
+
+def test_approval_controls_are_visible_for_all_pending_drafts():
+    from app.marketing import PAGE_HTML
+    assert "Approve finished post" in PAGE_HTML
+    assert "Ask AI to revise" in PAGE_HTML
+    assert "Reject" in PAGE_HTML
+    assert "Try another graphic design" in PAGE_HTML
