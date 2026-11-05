@@ -306,7 +306,7 @@ def match_media(draft, available: list[MarketingMedia], fmt: str = "portrait") -
     return scored[0][2] if scored[0][0] > 0 else None
 
 
-async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
+async def _generate_creative(draft_id: int, media_id: int | None, fmt: str, variant: int | None = None):
     from app.marketing import MarketingDraft
     if fmt not in (*FORMATS, "reel"):
         raise HTTPException(422, "Unsupported output format")
@@ -340,7 +340,8 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
         else:
             if source is None:
                 from app.marketing_templates import render_template
-                jpg = render_template(title, category, "story" if fmt == "reel" else fmt)
+                from app.marketing_designs import render as render_design
+                jpg = render_design(title, category, "story" if fmt == "reel" else fmt, (draft_id % 4 if variant is None else variant))
             else:
                 jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
             content = render_reel(jpg) if fmt == "reel" else jpg
@@ -361,8 +362,10 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
 
 
 @router.post("/drafts/{draft_id}/render")
-async def create_graphic(draft_id: int, format: str = "portrait", media_id: int | None = None):
-    return await _generate_creative(draft_id, media_id, format)
+async def create_graphic(draft_id: int, format: str = "portrait", media_id: int | None = None, variant: int | None = None):
+    if variant is not None and not 0 <= variant <= 3:
+        raise HTTPException(422, "Invalid design variant")
+    return await _generate_creative(draft_id, media_id, format, variant=variant)
 
 
 @router.get("/drafts/{draft_id}/creatives")
