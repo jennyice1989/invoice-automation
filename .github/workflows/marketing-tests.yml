@@ -4,6 +4,8 @@ on:
     paths:
       - "app/marketing.py"
       - "app/marketing_creative.py"
+      - "app/marketing_templates.py"
+      - "app/db.py"
       - "app/main.py"
       - "tests/test_marketing*.py"
       - "requirements.txt"
