@@ -102,6 +102,7 @@ _NAV = """<nav>
 <a href="/audit" id="nav-audit">Catalog audit</a>
 <a href="/category-manager" id="nav-categories">Categories</a>
 <a href="/fish-labels" id="nav-fish-labels">Fish labels</a>
+<a href="/marketing" id="nav-marketing">Marketing</a>
 <a href="/history" id="nav-history">History</a>
 <a href="/settings" id="nav-settings">Settings</a>
 <a href="/api-commands" id="nav-api">API</a>
