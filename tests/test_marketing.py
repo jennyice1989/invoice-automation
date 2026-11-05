@@ -28,3 +28,17 @@ def test_policy_prohibits_unverified_inventory_and_prices():
     assert "Never claim" in SYSTEM_PROMPT
     assert "stock" in SYSTEM_PROMPT
     assert "No livestock shipping promises" in SYSTEM_PROMPT
+
+
+def test_edit_rejects_empty_content():
+    from app.marketing import DraftEdit, RevisionRequest
+    with pytest.raises(ValidationError):
+        DraftEdit(caption="", creative_brief="Use real photography")
+    with pytest.raises(ValidationError):
+        RevisionRequest(instruction="x")
+
+
+def test_weekly_run_is_unique_per_week():
+    from app.marketing import MarketingWeeklyRun
+    assert any(c.primary_key for c in MarketingWeeklyRun.__table__.columns)
+    assert MarketingWeeklyRun.__table__.c.week_key.primary_key
