@@ -86,6 +86,8 @@ from app.ui import (
 )
 from app.upc_lookup import UpcLookupResult, lookup_upc_for_product
 
+from app.marketing import router as marketing_router  # registers marketing database model
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Invoice Importer", version="1.0.0", lifespan=lifespan)
+app.include_router(marketing_router)
 app.mount(
     "/static",
     StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
