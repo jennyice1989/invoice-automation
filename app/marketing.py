@@ -353,7 +353,10 @@ body{margin:0;padding:24px}main{max-width:1040px;margin:auto}
 a{color:#9bd0ff}.sub,small{color:#9ab0c2}p{line-height:1.45}
 .card{border:1px solid #365166;background:#1b2d3d;border-radius:13px;padding:20px;margin:17px 0}
 button{cursor:pointer;border:0;border-radius:7px;padding:10px 12px;margin:6px;font-weight:650;background:#b2dcf7;color:#102331}
-button.approve{background:#57c59a}button.reject{background:#e78f9b}button:disabled{opacity:.5}
+button.approve{background:#57c59a}button.reject{background:#e78f9b}
+.review-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;position:sticky;top:0;z-index:5;background:#1b2d3d;padding:12px 4px;border-bottom:1px solid #507085}
+.review-actions button{padding:13px 18px;font-size:16px}
+.review-actions button:disabled{opacity:.45}button:disabled{opacity:.5}
 input,select{padding:10px;background:#263d4f;color:white;border:1px solid #648096;border-radius:6px;max-width:100%;margin:5px}
 pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 .tag{display:inline-block;border:1px solid #648096;border-radius:14px;padding:3px 9px;margin:3px;font-size:12px}
@@ -397,12 +400,34 @@ async function refresh(){
  for(const d of data.data){
  const card=node('article',undefined,'card');card.append(node('h2',d.title));
  const meta=node('div');for(const m of [d.category,d.status,d.platforms.join(' + ')])meta.append(node('span',m,'tag'));card.append(meta);
+ let currentCreative=null;
+ const actions=node('div',undefined,'review-actions');
+ const approveAction=node('button','✓ Approve finished post','approve');
+ approveAction.disabled=true;
+ approveAction.onclick=async()=>{if(!currentCreative)return;approveAction.disabled=true;try{
+ await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'approve',creative_id:currentCreative.id})});
+ await refresh()}catch(e){msg.textContent=e.message;approveAction.disabled=false}};
+ const reviseAction=node('button','✎ Ask AI to revise');
+ const rejectAction=node('button','✕ Reject','reject');
+ if(d.status==='pending')actions.append(approveAction,reviseAction,rejectAction);
+ else actions.append(node('strong',d.status==='approved'?'Approved (not published)':'Rejected'));
+ card.append(actions);
+
  card.append(node('h3','Caption'),node('pre',d.caption),node('h3','Creative brief'),node('pre',d.creative_brief));
  card.append(node('small','Notes: '+d.source_notes));
  const gallery=node('div');card.append(gallery);
+ if(d.status==='pending'){const alternative=node('button','Try another graphic design');alternative.onclick=async()=>{
+ alternative.disabled=true;try{
+ const x=await api('/marketing/api/drafts/'+d.id+'/creatives');
+ const next=(x.data.length+1)%4;
+ await api('/marketing/api/drafts/'+d.id+'/render?format=portrait&variant='+next,{method:'POST'});
+ await refreshGallery();msg.textContent='Different composition created — review above and approve if you like it.'
+ }catch(e){msg.textContent=e.message}finally{alternative.disabled=false}};
+ card.append(alternative)}
  async function refreshGallery(){
   const result=await api('/marketing/api/drafts/'+d.id+'/creatives');
   gallery.replaceChildren(node('h3','Finished creative previews'));
+  currentCreative=result.data[0]||null;approveAction.disabled=!currentCreative;
   if(!result.data.length)gallery.append(node('p','No media generated yet. Choose a tagged store photo and create a graphic.'));
   for(const item of result.data){
     const tile=node('div',undefined,'preview');
@@ -435,10 +460,10 @@ async function refresh(){
   const revise=node('button','Ask AI to revise');
   revise.onclick=async()=>{const instruction=prompt('What would you like changed?');if(!instruction)return;
   revise.disabled=true;try{await api('/marketing/api/drafts/'+d.id+'/revise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instruction})});await refresh()}
-  catch(err){msg.textContent=err.message;revise.disabled=false}};card.append(revise);
+  catch(err){msg.textContent=err.message;revise.disabled=false}};card.append(revise);reviseAction.onclick=()=>revise.click();
   const reject=node('button','Reject','reject');
   reject.onclick=async()=>{try{await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'reject'})});await refresh()}
-  catch(err){msg.textContent=err.message}};card.append(reject);
+  catch(err){msg.textContent=err.message}};card.append(reject);rejectAction.onclick=()=>reject.click();
  }
  drafts.append(card);refreshGallery().catch(err=>msg.textContent=err.message)
  }
