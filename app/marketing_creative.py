@@ -50,7 +50,7 @@ class MarketingCreative(Base):
     __tablename__ = "marketing_creatives"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     draft_id: Mapped[int] = mapped_column(Integer, ForeignKey("marketing_drafts.id"), index=True)
-    media_id: Mapped[int] = mapped_column(Integer, ForeignKey("marketing_media.id"))
+    media_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("marketing_media.id"), nullable=True)
     format: Mapped[str] = mapped_column(String(30))
     mime: Mapped[str] = mapped_column(String(50))
     content_fingerprint: Mapped[str] = mapped_column(String(64))
@@ -324,19 +324,25 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
             available = (await session.execute(select(MarketingMedia)
                          .where(MarketingMedia.approved.is_(True)))).scalars().all()
             media = match_media(draft, available, fmt)
-            if media is None:
-                raise HTTPException(409, "No suitable approved store photograph matches this post. Upload and tag a photo.")
-        if media.mime == "video/mp4" and fmt != "reel":
+            # A missing match is not a blocker: the branded template works without photos.
+        if media is not None and media.mime == "video/mp4" and fmt != "reel":
             raise HTTPException(422, "Video clips can only produce reels")
-        title, source, selected_id = _headline(draft), media.data, media.id
-        source_mime = media.mime
+        title = _headline(draft)
+        source = media.data if media is not None else None
+        selected_id = media.id if media is not None else None
+        source_mime = media.mime if media is not None else None
+        category = draft.category
         fingerprint = content_fingerprint(draft)
 
     try:
         if source_mime == "video/mp4":
             content = render_clip(source, title)
         else:
-            jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
+            if source is None:
+                from app.marketing_templates import render_template
+                jpg = render_template(title, category, "story" if fmt == "reel" else fmt)
+            else:
+                jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
             content = render_reel(jpg) if fmt == "reel" else jpg
     except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(422, str(exc)) from exc
