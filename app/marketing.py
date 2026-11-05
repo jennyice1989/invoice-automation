@@ -304,38 +304,103 @@ async def decide(draft_id: int, decision: Decision):
 
 PAGE_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>A2Z Marketing Center</title>
-<style>
-:root{font-family:system-ui,sans-serif;color:#e8eef4;background:#101b27}
-body{margin:0;padding:24px}main{max-width:900px;margin:auto}a{color:#9bd0ff}
-h1{margin-bottom:4px}p{line-height:1.5}.sub{color:#9aaebe}
-.card{border:1px solid #34485b;border-radius:12px;background:#192a39;padding:20px;margin:15px 0}
-.tag{display:inline-block;border:1px solid #476274;border-radius:20px;padding:3px 9px;font-size:12px;margin-right:5px}
-button{border:0;border-radius:7px;padding:10px 16px;margin-right:8px;cursor:pointer;font-weight:600}
-.primary{background:#37a6e7;color:#071c2b}.approve{background:#3fb789;color:#061e17}
-.reject{background:#dc7882;color:#2b0911}button:disabled{opacity:.45;cursor:default}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
-small{color:#9aaebe}#message{min-height:25px}
+<title>A2Z Marketing Center</title><style>
+:root{font:15px system-ui,sans-serif;background:#101b27;color:#eaf2f8}
+body{margin:0;padding:24px}main{max-width:1040px;margin:auto}
+a{color:#9bd0ff}.sub,small{color:#9ab0c2}p{line-height:1.45}
+.card{border:1px solid #365166;background:#1b2d3d;border-radius:13px;padding:20px;margin:17px 0}
+button{cursor:pointer;border:0;border-radius:7px;padding:10px 12px;margin:6px;font-weight:650;background:#b2dcf7;color:#102331}
+button.approve{background:#57c59a}button.reject{background:#e78f9b}button:disabled{opacity:.5}
+input,select{padding:10px;background:#263d4f;color:white;border:1px solid #648096;border-radius:6px;max-width:100%;margin:5px}
+pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
+.tag{display:inline-block;border:1px solid #648096;border-radius:14px;padding:3px 9px;margin:3px;font-size:12px}
+.preview{display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;border:1px solid #648096;padding:10px;border-radius:10px;margin:7px;vertical-align:top}
+.preview img,.preview video{width:210px;max-width:100%;border-radius:6px}
+#library img{height:55px;width:55px;object-fit:cover;vertical-align:middle;margin-right:8px}
 </style></head><body><main>
-<a href="/">← Back to A2Z tools</a>
-<h1>A2Z Marketing Center</h1>
-<p class="sub">Your AI drafts the ideas and copy. You approve or reject. No social posts are published from this version.</p>
-<button class="primary" id="generate">Generate 5 new ideas</button>
-<p id="message" role="status"></p><section id="drafts"></section>
+<a href="/">← Back to A2Z tools</a><h1>A2Z Marketing Center</h1>
+<p class="sub">AI plans the posts; approved real store photos become branded graphics and short photo reels. Review the complete post before approving. No publishing is connected.</p>
+<section class="card"><h2>Store photo library</h2><p class="sub">Only upload photos you own or are licensed to use. Tags help the AI select suitable photographs. No synthetic animal images.</p>
+<form id="upload"><input id="file" type="file" accept="image/jpeg,image/png,image/webp" required>
+<input id="label" placeholder="Photo label" maxlength="180">
+<input id="tags" placeholder="Tags: freshwater, corals, plants, betta..." maxlength="500">
+<button type="submit">Add approved photo</button></form><div id="library"></div></section>
+<button id="generate">Generate 5 new post ideas</button><p id="message" role="status"></p>
+<section id="drafts"></section>
 </main><script>
-const drafts=document.getElementById('drafts'), msg=document.getElementById('message');
-function node(tag, text, cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
-async function request(url,options){const r=await fetch(url,options);let payload;try{payload=await r.json()}catch{throw Error('Unexpected server response')}
-if(!r.ok)throw Error(payload.detail||'Request failed');return payload}
-async function refresh(){try{const x=await request('/marketing/api/drafts');drafts.replaceChildren();if(!x.data.length)drafts.append(node('p','No drafts yet. Generate your first content plan.'));
-for(const d of x.data){const c=node('article',undefined,'card');c.append(node('h2',d.title));
-const meta=node('p');meta.append(node('span',d.category,'tag'),node('span',d.status,'tag'),node('span',d.platforms.join(' · '),'tag'));c.append(meta);
-c.append(node('h3','Caption'),node('pre',d.caption),node('h3','Creative brief'),node('pre',d.creative_brief));
-c.append(node('small','Source notes: '+d.source_notes));
-if(d.status==='pending'){const edit=node('button','Edit text','primary');edit.onclick=async()=>{const caption=prompt('Edit caption:',d.caption);if(caption===null)return;const brief=prompt('Edit creative brief:',d.creative_brief);if(brief===null)return;try{await request('/marketing/api/drafts/'+d.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({caption,creative_brief:brief})});await refresh()}catch(e){msg.textContent=e.message}};c.append(edit);
-const revise=node('button','Ask AI to revise');revise.onclick=async()=>{const instruction=prompt('What should the AI change?');if(!instruction)return;revise.disabled=true;try{await request('/marketing/api/drafts/'+d.id+'/revise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instruction})});await refresh()}catch(e){msg.textContent=e.message;revise.disabled=false}};c.append(revise);
-const row=node('p');for(const action of ['approve','reject']){const b=node('button',action==='approve'?'Approve':'Reject',action);b.onclick=async()=>{b.disabled=true;try{await request('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});await refresh()}catch(e){msg.textContent=e.message;b.disabled=false}};row.append(b)}c.append(row)}
-drafts.append(c)}}catch(e){msg.textContent=e.message}}
-document.getElementById('generate').onclick=async function(){this.disabled=true;msg.textContent='Generating ideas…';try{await request('/marketing/api/generate',{method:'POST'});msg.textContent='New drafts are ready for review.';await refresh()}catch(e){msg.textContent=e.message}finally{this.disabled=false}};
-refresh();
+const msg=document.getElementById('message'),drafts=document.getElementById('drafts');
+let media=[];
+function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e}
+async function api(url,options){const res=await fetch(url,options),json=await res.json();if(!res.ok)throw Error(typeof json.detail==='string'?json.detail:'Operation failed');return json}
+async function loadMedia(){
+ const result=await api('/marketing/api/media');media=result.data;
+ const root=document.getElementById('library');root.replaceChildren(node('p',media.length+' photos in library'));
+ for(const m of media.slice(0,30)){const span=node('span',undefined,'tag'),img=node('img');img.src=m.url;img.alt=m.label;span.append(img,node('span',m.label));root.append(span)}
+}
+document.getElementById('upload').onsubmit=async function(e){
+ e.preventDefault();const f=document.getElementById('file').files[0];if(!f)return;
+ const data=new FormData();data.append('file',f);
+ const label=document.getElementById('label').value,tags=document.getElementById('tags').value;
+ try{await api('/marketing/api/media?label='+encodeURIComponent(label)+'&tags='+encodeURIComponent(tags),{method:'POST',body:data});
+ this.reset();msg.textContent='Photo added.';await loadMedia();await refresh()}
+ catch(err){msg.textContent=err.message}
+};
+async function refresh(){
+ const data=await api('/marketing/api/drafts');drafts.replaceChildren();
+ if(!data.data.length)drafts.append(node('p','No drafts yet. Generate ideas to begin.'));
+ for(const d of data.data){
+ const card=node('article',undefined,'card');card.append(node('h2',d.title));
+ const meta=node('div');for(const m of [d.category,d.status,d.platforms.join(' + ')])meta.append(node('span',m,'tag'));card.append(meta);
+ card.append(node('h3','Caption'),node('pre',d.caption),node('h3','Creative brief'),node('pre',d.creative_brief));
+ card.append(node('small','Notes: '+d.source_notes));
+ const gallery=node('div');card.append(gallery);
+ async function refreshGallery(){
+  const result=await api('/marketing/api/drafts/'+d.id+'/creatives');
+  gallery.replaceChildren(node('h3','Finished creative previews'));
+  if(!result.data.length)gallery.append(node('p','No media generated yet. Choose a tagged store photo and create a graphic.'));
+  for(const item of result.data){
+    const tile=node('div',undefined,'preview');
+    if(item.mime==='video/mp4'){const vid=node('video');vid.src=item.url;vid.controls=true;tile.append(vid)}
+    else{const img=node('img');img.src=item.url;img.alt=item.format+' A2Z branded graphic';tile.append(img)}
+    tile.append(node('small',item.format+' creative #'+item.id));
+    if(d.status==='pending'){
+      const btn=node('button','Approve this finished post','approve');
+      btn.onclick=async()=>{btn.disabled=true;try{await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'approve',creative_id:item.id})});await refresh()}catch(err){msg.textContent=err.message;btn.disabled=false}};tile.append(btn)
+    }gallery.append(tile)
+  }
+ }
+ if(d.status==='pending'){
+  const chooser=node('select'),opt=node('option','Automatic matching');opt.value='';chooser.append(opt);
+  for(const m of media){const choice=node('option',m.label+' ('+m.tags+')');choice.value=m.id;chooser.append(choice)}
+  card.append(node('h3','Create finished media'),chooser);
+  for(const format of ['square','portrait','story','reel']){
+   const btn=node('button','Generate '+format);
+   btn.onclick=async()=>{btn.disabled=true;msg.textContent='Rendering '+format+'...';
+   try{let u='/marketing/api/drafts/'+d.id+'/render?format='+format;if(chooser.value)u+='&media_id='+chooser.value;
+   await api(u,{method:'POST'});await refreshGallery();msg.textContent='Creative ready for review.'}
+   catch(err){msg.textContent=err.message}finally{btn.disabled=false}};card.append(btn)
+  }
+  card.append(node('h3','Make changes'));
+  const edit=node('button','Edit caption / brief');
+  edit.onclick=async()=>{const caption=prompt('Edit caption',d.caption);if(caption===null)return;
+  const creative_brief=prompt('Edit creative brief',d.creative_brief);if(creative_brief===null)return;
+  try{await api('/marketing/api/drafts/'+d.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({caption,creative_brief})});await refresh()}
+  catch(err){msg.textContent=err.message}};card.append(edit);
+  const revise=node('button','Ask AI to revise');
+  revise.onclick=async()=>{const instruction=prompt('What would you like changed?');if(!instruction)return;
+  revise.disabled=true;try{await api('/marketing/api/drafts/'+d.id+'/revise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instruction})});await refresh()}
+  catch(err){msg.textContent=err.message;revise.disabled=false}};card.append(revise);
+  const reject=node('button','Reject','reject');
+  reject.onclick=async()=>{try{await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'reject'})});await refresh()}
+  catch(err){msg.textContent=err.message}};card.append(reject);
+ }
+ drafts.append(card);refreshGallery().catch(err=>msg.textContent=err.message)
+ }
+}
+document.getElementById('generate').onclick=async function(){
+ this.disabled=true;msg.textContent='Generating ideas...';
+ try{await api('/marketing/api/generate',{method:'POST'});await refresh();msg.textContent='New posts are ready for creative production.'}
+ catch(err){msg.textContent=err.message}finally{this.disabled=false}
+};
+loadMedia().then(refresh).catch(err=>msg.textContent=err.message);
 </script></body></html>"""
