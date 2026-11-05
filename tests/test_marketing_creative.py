@@ -23,7 +23,7 @@ def fixture_photo():
 def test_render_all_social_aspect_ratios():
     for fmt, dimensions in FORMATS.items():
         img = render_photo(fixture_photo(), "Aquarium maintenance basics", fmt)
-        assert img.startswith(b"\\xff\\xd8")
+        assert img.startswith(bytes([255, 216]))
         with Image.open(io.BytesIO(img)) as result:
             assert result.size == dimensions
 
