@@ -60,3 +60,19 @@ def test_media_match_prefers_relevant_tagged_photo():
     unrelated = MarketingMedia(id=3, label="Guppy", tags="freshwater fish",
                                mime="image/jpeg", data=fixture_photo())
     assert match_media(d, [unrelated, reef]).id == 2
+
+
+def test_branded_fallback_creates_complete_graphic_without_photo():
+    from app.marketing_templates import render_template
+    from app.marketing_creative import FORMATS
+    for name in ("square", "portrait", "story"):
+        payload = render_template("Choosing the Right Aquarium Setup", "education", name)
+        assert payload.startswith(bytes([255, 216]))
+        with Image.open(io.BytesIO(payload)) as img:
+            assert img.size == FORMATS[name]
+
+
+def test_fallback_graphic_is_not_a_photo_substitute():
+    from app.marketing_templates import render_template
+    payload = render_template("Aquarium Water Testing 101", "education", "portrait")
+    assert len(payload) > 8000
