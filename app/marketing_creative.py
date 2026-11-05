@@ -6,6 +6,7 @@ do not erase creative assets. This module NEVER publishes to social networks.
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -51,8 +52,15 @@ class MarketingCreative(Base):
     media_id: Mapped[int] = mapped_column(Integer, ForeignKey("marketing_media.id"))
     format: Mapped[str] = mapped_column(String(30))
     mime: Mapped[str] = mapped_column(String(50))
+    content_fingerprint: Mapped[str] = mapped_column(String(64))
     data: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+def content_fingerprint(draft) -> str:
+    payload = json.dumps([draft.title, draft.caption, draft.creative_brief],
+                         ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def safe_text(s: str) -> str:
@@ -252,6 +260,7 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
             if media is None:
                 raise HTTPException(409, "No suitable approved store photograph matches this post. Upload and tag a photo.")
         title, source, selected_id = _headline(draft), media.data, media.id
+        fingerprint = content_fingerprint(draft)
 
     try:
         jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
@@ -266,7 +275,7 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
             raise HTTPException(409, "Draft no longer pending")
         row = MarketingCreative(draft_id=draft_id, media_id=selected_id,
                                 format=fmt, mime="video/mp4" if fmt == "reel" else "image/jpeg",
-                                data=content)
+                                content_fingerprint=fingerprint, data=content)
         session.add(row)
         await session.flush()
         return {"data": creative_details(row)}
