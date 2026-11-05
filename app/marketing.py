@@ -333,9 +333,9 @@ pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 #library img{height:55px;width:55px;object-fit:cover;vertical-align:middle;margin-right:8px}
 </style></head><body><main>
 <a href="/">← Back to A2Z tools</a><h1>A2Z Marketing Center</h1>
-<p class="sub">AI plans the posts; approved real store photos become branded graphics and short photo reels. Review the complete post before approving. No publishing is connected.</p>
-<section class="card"><h2>Store photo library</h2><p class="sub">Only upload photos you own or are licensed to use. Tags help the AI select suitable photographs. No synthetic animal images.</p>
-<form id="upload"><input id="file" type="file" accept="image/jpeg,image/png,image/webp" required>
+<p class="sub">AI plans the posts; approved real store photos and footage become branded graphics and short reels. Review the complete post before approving. No publishing is connected.</p>
+<section class="card"><h2>Store photo library</h2><p class="sub">Only upload photos or video you own or are licensed to use. Tags help match the right subject. No synthetic animal images.</p>
+<form id="upload"><input id="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" required>
 <input id="label" placeholder="Photo label" maxlength="180">
 <input id="tags" placeholder="Tags: freshwater, corals, plants, betta..." maxlength="500">
 <button type="submit">Add approved photo</button></form><div id="library"></div></section>
@@ -349,7 +349,10 @@ async function api(url,options){const res=await fetch(url,options),json=await re
 async function loadMedia(){
  const result=await api('/marketing/api/media');media=result.data;
  const root=document.getElementById('library');root.replaceChildren(node('p',media.length+' photos in library'));
- for(const m of media.slice(0,30)){const span=node('span',undefined,'tag'),img=node('img');img.src=m.url;img.alt=m.label;span.append(img,node('span',m.label));root.append(span)}
+ for(const m of media.slice(0,30)){const span=node('span',undefined,'tag');
+if(m.mime==='video/mp4'){span.append(node('span','🎬 Clip · '))}
+else {const img=node('img');img.src=m.url;img.alt=m.label;span.append(img)}
+span.append(node('span',m.label));root.append(span)}
 }
 document.getElementById('upload').onsubmit=async function(e){
  e.preventDefault();const f=document.getElementById('file').files[0];if(!f)return;
