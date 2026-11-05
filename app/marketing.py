@@ -193,6 +193,35 @@ async def _build_drafts():
     return created
 
 
+@router.post("/api/render-pending", dependencies=[Depends(require_auth)])
+async def render_pending():
+    """Fill missing finished graphics for existing posts, without duplicating drafts."""
+    from app.marketing_creative import MarketingCreative, _generate_creative
+    async with session_scope() as session:
+        pending_ids = (await session.execute(
+            select(MarketingDraft.id)
+            .where(MarketingDraft.status == "pending")
+            .order_by(MarketingDraft.id.desc())
+            .limit(30)
+        )).scalars().all()
+        existing = (await session.execute(
+            select(MarketingCreative.draft_id)
+            .where(MarketingCreative.draft_id.in_(pending_ids))
+            .where(MarketingCreative.format == "portrait")
+        )).scalars().all() if pending_ids else []
+    missing = [pid for pid in pending_ids if pid not in set(existing)]
+    created = []
+    errors = []
+    for pid in missing:
+        try:
+            rendered = await _generate_creative(pid, None, "portrait")
+            created.append(rendered["data"]["id"])
+        except Exception:
+            logger.exception("Unable to automatically render draft %s", pid)
+            errors.append(pid)
+    return {"rendered": len(created), "creative_ids": created, "failed_draft_ids": errors}
+
+
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate_drafts():
     return {"data": await _build_drafts()}
@@ -339,7 +368,7 @@ pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 <input id="label" placeholder="Photo label" maxlength="180">
 <input id="tags" placeholder="Tags: freshwater, corals, plants, betta..." maxlength="500">
 <button type="submit">Add approved photo</button></form><div id="library"></div></section>
-<button id="generate">Generate 5 new post ideas</button><p id="message" role="status"></p>
+<button id="generate">Generate 5 new post ideas</button><button id="fill-media">Create graphics for existing drafts</button><p id="message" role="status"></p>
 <section id="drafts"></section>
 </main><script>
 const msg=document.getElementById('message'),drafts=document.getElementById('drafts');
@@ -417,6 +446,11 @@ async function refresh(){
 document.getElementById('generate').onclick=async function(){
  this.disabled=true;msg.textContent='Generating ideas...';
  try{await api('/marketing/api/generate',{method:'POST'});await refresh();msg.textContent='New posts are ready for creative production.'}
+ catch(err){msg.textContent=err.message}finally{this.disabled=false}
+};
+document.getElementById('fill-media').onclick=async function(){
+ this.disabled=true;msg.textContent='Building graphics for existing drafts...';
+ try{const x=await api('/marketing/api/render-pending',{method:'POST'});await refresh();msg.textContent=x.rendered+' graphics created.'+(x.failed_draft_ids.length?' Some drafts failed; see Render logs.':'')}
  catch(err){msg.textContent=err.message}finally{this.disabled=false}
 };
 loadMedia().then(refresh).catch(err=>msg.textContent=err.message);
