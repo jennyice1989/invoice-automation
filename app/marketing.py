@@ -68,7 +68,7 @@ def serialize(d: MarketingDraft) -> dict:
         "id": d.id, "title": d.title, "category": d.category,
         "platforms": json.loads(d.platforms_json or '["Facebook","Instagram"]'), "caption": d.caption,
         "creative_brief": d.creative_brief, "source_notes": d.source_notes,
-        "status": d.status, "created_at": d.created_at.isoformat(),
+        "status": d.status or "pending", "created_at": d.created_at.isoformat(),
         "approved_creative_id": d.approved_creative_id,
     }
 
