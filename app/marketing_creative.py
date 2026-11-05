@@ -27,6 +27,7 @@ from app.db import Base, session_scope
 router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
 Image.MAX_IMAGE_PIXELS = 24_000_000
 MAX_UPLOAD = 8 * 1024 * 1024
+MAX_VIDEO_UPLOAD = 25 * 1024 * 1024
 MAX_RENDER = 12 * 1024 * 1024
 FORMATS = {"square": (1080, 1080), "portrait": (1080, 1350), "story": (1080, 1920)}
 VALID_TAG = re.compile(r"[^a-z0-9 ]+")
@@ -164,8 +165,59 @@ def render_reel(image_bytes: bytes) -> bytes:
         return target.read_bytes()
 
 
+def render_clip(clip_bytes: bytes, headline: str) -> bytes:
+    """Create a 9-second vertical MP4 from actual store footage.
+
+    Brand overlay is authored separately and composited with the original clip.
+    No AI-synthesized animals, no unlicensed music, no audio from the source clip.
+    """
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+    except ImportError as exc:
+        raise RuntimeError("Video encoder unavailable") from exc
+    with tempfile.TemporaryDirectory(prefix="a2z-video-") as folder:
+        src = Path(folder) / "input.mp4"
+        overlay_file = Path(folder) / "overlay.png"
+        output = Path(folder) / "reel.mp4"
+        src.write_bytes(clip_bytes)
+        canvas = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+        for y in range(740, 1280):
+            alpha = int(205 * (y - 740) / 540)
+            draw.line((0, y, 720, y), fill=(5, 15, 25, alpha))
+        font = _font(46)
+        for i, line in enumerate(_wrap(draw, headline, font, 610, limit=3)):
+            draw.text((52, 950 + 60 * i), line, fill="white", font=font)
+        draw.rounded_rectangle((52, 1205, 668, 1211), radius=3, fill=(48, 197, 207, 255))
+        if LOGO.exists():
+            with Image.open(LOGO) as raw:
+                logo = raw.convert("RGBA")
+                logo.thumbnail((116, 116), Image.Resampling.LANCZOS)
+                canvas.alpha_composite(logo, (720 - 52 - logo.width, 40))
+        canvas.save(overlay_file, "PNG")
+        cmd = [
+            get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(src), "-loop", "1", "-i", str(overlay_file),
+            "-filter_complex",
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,setsar=1,fps=25[bg];"
+            "[bg][1:v]overlay=0:0:shortest=1,format=yuv420p[v]",
+            "-map", "[v]", "-an", "-t", "9",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "29",
+            "-movflags", "+faststart", str(output),
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=100, stderr=subprocess.PIPE,
+                           stdout=subprocess.DEVNULL)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+            raise RuntimeError("Unable to encode uploaded store footage") from exc
+        if not output.exists() or not output.stat().st_size or output.stat().st_size > MAX_RENDER:
+            raise RuntimeError("Encoded reel invalid or exceeds 12 MB")
+        return output.read_bytes()
+
+
 def media_details(m: MarketingMedia):
-    return {"id": m.id, "label": m.label, "tags": m.tags,
+    return {"id": m.id, "label": m.label, "tags": m.tags, "mime": m.mime,
             "approved": m.approved, "url": f"/marketing/api/media/{m.id}/file"}
 
 
@@ -186,11 +238,25 @@ async def list_media():
 
 @router.post("/media")
 async def upload_media(file: UploadFile = File(...), label: str = "", tags: str = ""):
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(415, "Upload a JPEG, PNG or WebP photograph")
-    data = await file.read(MAX_UPLOAD + 1)
-    if len(data) > MAX_UPLOAD:
-        raise HTTPException(413, "Photo exceeds 8 MB")
+    allowed = ("image/jpeg", "image/png", "image/webp", "video/mp4")
+    if file.content_type not in allowed:
+        raise HTTPException(415, "Upload JPEG, PNG, WebP or MP4 store media")
+    is_video = file.content_type == "video/mp4"
+    limit = MAX_VIDEO_UPLOAD if is_video else MAX_UPLOAD
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(413, "Uploaded media is too large")
+    if is_video:
+        # MP4 container header sanity check. ffmpeg will validate actual codecs on render.
+        if len(data) < 32 or data[4:8] != b"ftyp":
+            raise HTTPException(422, "Invalid MP4 container")
+        label = safe_text(label or file.filename or "Store clip")[:180]
+        tags = safe_text(tags).lower()[:500]
+        async with session_scope() as session:
+            m = MarketingMedia(label=label, tags=tags, mime="video/mp4", data=data)
+            session.add(m)
+            await session.flush()
+            return {"data": media_details(m)}
     try:
         with Image.open(io.BytesIO(data)) as raw:
             raw.verify()
@@ -225,7 +291,8 @@ async def media_file(media_id: int):
                         "X-Content-Type-Options": "nosniff"})
 
 
-def match_media(draft, available: list[MarketingMedia]) -> MarketingMedia | None:
+def match_media(draft, available: list[MarketingMedia], fmt: str = "portrait") -> MarketingMedia | None:
+    available = [m for m in available if m.mime == "image/jpeg" or (fmt == "reel" and m.mime == "video/mp4")]
     if not available:
         return None
     words = set(VALID_TAG.sub(" ", (draft.title + " " + draft.category).lower()).split())
@@ -256,15 +323,21 @@ async def _generate_creative(draft_id: int, media_id: int | None, fmt: str):
         else:
             available = (await session.execute(select(MarketingMedia)
                          .where(MarketingMedia.approved.is_(True)))).scalars().all()
-            media = match_media(draft, available)
+            media = match_media(draft, available, fmt)
             if media is None:
                 raise HTTPException(409, "No suitable approved store photograph matches this post. Upload and tag a photo.")
+        if media.mime == "video/mp4" and fmt != "reel":
+            raise HTTPException(422, "Video clips can only produce reels")
         title, source, selected_id = _headline(draft), media.data, media.id
+        source_mime = media.mime
         fingerprint = content_fingerprint(draft)
 
     try:
-        jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
-        content = render_reel(jpg) if fmt == "reel" else jpg
+        if source_mime == "video/mp4":
+            content = render_clip(source, title)
+        else:
+            jpg = render_photo(source, title, "story" if fmt == "reel" else fmt)
+            content = render_reel(jpg) if fmt == "reel" else jpg
     except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     if len(content) > MAX_RENDER:
