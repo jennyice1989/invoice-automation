@@ -5,6 +5,7 @@ This is a draft/approval MVP. It deliberately does not publish externally.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from app.auth import COOKIE_NAME, require_auth, require_auth_html
 from app.db import Base, CatalogProduct, session_scope
 
 router = APIRouter(prefix="/marketing", tags=["marketing"])
+logger = logging.getLogger(__name__)
 
 
 class MarketingDraft(Base):
@@ -176,7 +178,19 @@ async def _build_drafts():
         ]
         session.add_all(rows)
         await session.flush()
-        return [serialize(d) for d in rows]
+        created = [serialize(d) for d in rows]
+    # Automatically compose actual media for drafts when a suitable approved
+    # store photo exists. Missing photos leave drafts pending; never fabricate
+    # a mismatched animal image. A failed render must not discard written posts.
+    from app.marketing_creative import _generate_creative
+    for item in created:
+        try:
+            await _generate_creative(item["id"], None, "portrait")
+        except HTTPException as exc:
+            logger.warning("Marketing creative unavailable for draft %s: %s", item["id"], exc.detail)
+        except Exception:
+            logger.exception("Creative rendering failed for draft %s", item["id"])
+    return created
 
 
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
