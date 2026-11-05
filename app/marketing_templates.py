@@ -48,14 +48,13 @@ def render_template(headline: str, category: str, fmt: str = "portrait") -> byte
     w, h = SIZES[fmt]
     # All artistic elements are abstract. No invented fish, products, or displays.
     img = Image.new("RGB", (w, h))
-    pixels = img.load()
+    background_draw = ImageDraw.Draw(img)
     for y in range(h):
         t = y / h
         top = (8, 28, 45)
         bottom = (3, 75, 89)
         color = tuple(int(a * (1 - t) + b * t) for a, b in zip(top, bottom))
-        for x in range(w):
-            pixels[x, y] = color
+        background_draw.line((0, y, w, y), fill=color)
     art = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(art)
     # Large curves and rings add depth without suggesting real aquarium livestock.
