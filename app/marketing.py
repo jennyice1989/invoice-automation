@@ -36,6 +36,7 @@ class MarketingDraft(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_creative_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class MarketingWeeklyRun(Base):
@@ -57,6 +58,7 @@ class RevisionRequest(BaseModel):
 
 class Decision(BaseModel):
     action: str = Field(pattern="^(approve|reject)$")
+    creative_id: int | None = Field(default=None, ge=1)
 
 
 def serialize(d: MarketingDraft) -> dict:
@@ -65,6 +67,7 @@ def serialize(d: MarketingDraft) -> dict:
         "platforms": json.loads(d.platforms_json), "caption": d.caption,
         "creative_brief": d.creative_brief, "source_notes": d.source_notes,
         "status": d.status, "created_at": d.created_at.isoformat(),
+        "approved_creative_id": d.approved_creative_id,
     }
 
 
@@ -282,6 +285,16 @@ async def decide(draft_id: int, decision: Decision):
             raise HTTPException(404, "Draft not found")
         if draft.status != "pending":
             raise HTTPException(409, "Draft has already been reviewed")
+        if decision.action == "approve":
+            from app.marketing_creative import MarketingCreative, content_fingerprint
+            if decision.creative_id is None:
+                raise HTTPException(422, "Select and review a finished graphic or reel before approval")
+            creative = await session.get(MarketingCreative, decision.creative_id)
+            if creative is None or creative.draft_id != draft_id:
+                raise HTTPException(422, "Creative not found for this draft")
+            if creative.content_fingerprint != content_fingerprint(draft):
+                raise HTTPException(409, "Content changed since rendering. Regenerate before approval")
+            draft.approved_creative_id = creative.id
         draft.status = "approved" if decision.action == "approve" else "rejected"
         draft.reviewed_at = datetime.utcnow()
         await session.flush()
