@@ -93,7 +93,7 @@ def test_four_poster_variants_are_distinct():
 
 def test_approval_controls_are_visible_for_all_pending_drafts():
     from app.marketing import PAGE_HTML
-    assert "Approve finished post" in PAGE_HTML
+    assert "Approve selected visual + caption" in PAGE_HTML
     assert "Ask AI to revise" in PAGE_HTML
     assert "Reject" in PAGE_HTML
     assert "Try another graphic design" in PAGE_HTML
