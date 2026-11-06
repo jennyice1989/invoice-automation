@@ -416,6 +416,13 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Earlier creative versions required a source photograph. Abstract
+        # branded templates need no source media, so allow NULL media_id.
+        if "marketing_creatives" in Base.metadata.tables:
+            from sqlalchemy import text as _migration_text
+            await conn.execute(_migration_text(
+                "ALTER TABLE marketing_creatives ALTER COLUMN media_id DROP NOT NULL"
+            ))
         # Lightweight migration: add columns that may not exist on
         # databases created by earlier versions. create_all() never
         # alters existing tables, so we do it explicitly. Postgres

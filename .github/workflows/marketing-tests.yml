@@ -1,0 +1,31 @@
+name: Marketing creative tests
+on:
+  pull_request:
+    paths:
+      - "app/marketing.py"
+      - "app/marketing_creative.py"
+      - "app/marketing_templates.py"
+      - "app/marketing_designs.py"
+      - "app/marketing_visuals.py"
+      - "app/db.py"
+      - "app/main.py"
+      - "tests/test_marketing*.py"
+      - "requirements.txt"
+      - ".github/workflows/marketing-tests.yml"
+  push:
+    branches: [feature/a2z-marketing-center]
+jobs:
+  test-marketing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile app modules
+        run: python -m compileall -q app
+      - name: Run marketing tests
+        run: pytest -q tests/test_marketing.py tests/test_marketing_creative.py tests/test_marketing_visuals.py
