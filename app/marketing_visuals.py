@@ -38,7 +38,7 @@ def headline_for(title: str) -> str:
 def overlay_title(draft: MarketingDraft) -> str:
     """Prefer the creative brief's short proposed onscreen hook."""
     brief = draft.creative_brief or ""
-    hit = re.search(r"(?:text overlay|overlay headline|on-image headline|headline)\\s*:\\s*['\\\"]([^'\\\"]{5,80})['\\\"]", brief, re.IGNORECASE)
+    hit = re.search(r"(?:text overlay|overlay headline|on-image headline|headline)\s*:\s*['\"]([^'\"]{5,80})['\"]", brief, re.IGNORECASE)
     if hit:
         return hit.group(1).strip()
     return draft.title
