@@ -38,3 +38,12 @@ def test_review_ui_has_ai_visual_option_and_selected_approval():
     assert "Create realistic AI visual" in PAGE_HTML
     assert "Approve selected visual + caption" in PAGE_HTML
     assert "AI CONCEPT" in PAGE_HTML
+
+
+def test_brief_onscreen_hook_beats_long_document_title():
+    from app.marketing_visuals import overlay_title
+    draft = SimpleNamespace(
+        title="Choosing the Right Aquarium Filter: What You Need to Know",
+        creative_brief="Closeup of a filter. Text overlay: 'Find Your Perfect Filter'."
+    )
+    assert overlay_title(draft) == "Find Your Perfect Filter"
