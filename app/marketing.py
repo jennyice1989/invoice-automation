@@ -361,7 +361,7 @@ input,select{padding:10px;background:#263d4f;color:white;border:1px solid #64809
 pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 .tag{display:inline-block;border:1px solid #648096;border-radius:14px;padding:3px 9px;margin:3px;font-size:12px}
 .preview{display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;border:1px solid #648096;padding:10px;border-radius:10px;margin:7px;vertical-align:top}
-.preview img,.preview video{width:280px;max-width:100%;border-radius:9px}
+.preview img,.preview video{width:360px;max-width:100%;border-radius:9px}
 .preview{cursor:pointer;transition:border-color .15s}
 .preview.selected{border:3px solid #54d7be;background:#264d4c}
 .generated-note{font-size:13px;color:#f4d5ad}
@@ -419,9 +419,7 @@ async function refresh(){
  else actions.append(node('strong',d.status==='approved'?'Approved (not published)':'Rejected'));
  card.append(actions);
 
- card.append(node('h3','Caption'),node('pre',d.caption));
- const context=node('details',undefined,'creative-details');const sum=node('summary','AI planning notes & creative brief');
- context.append(sum,node('pre',d.creative_brief),node('small','Notes: '+d.source_notes));card.append(context);
+
  if(d.status==='pending'){
   const photoBtn=node('button','✨ Create realistic AI visual','hero-action');
   photoBtn.onclick=async()=>{photoBtn.disabled=true;msg.textContent='Generating a realistic visual concept for '+d.title+'...';
@@ -430,6 +428,10 @@ async function refresh(){
   card.append(photoBtn,node('p','Creates an illustrative AI scene, not an image of actual A2Z stock. Image API usage may incur charges.','generated-note'))
  }
  const gallery=node('div');card.append(gallery);
+ card.append(node('h3','Ready-to-post caption'),node('pre',d.caption));
+ const context=node('details',undefined,'creative-details');
+ context.append(node('summary','Planning notes (optional)'),node('pre',d.creative_brief),node('small','Notes: '+d.source_notes));
+ card.append(context);
  if(d.status==='pending'){const alternative=node('button','Try another graphic design');alternative.onclick=async()=>{
  alternative.disabled=true;try{
  const x=await api('/marketing/api/drafts/'+d.id+'/creatives');
