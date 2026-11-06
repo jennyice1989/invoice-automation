@@ -361,11 +361,17 @@ input,select{padding:10px;background:#263d4f;color:white;border:1px solid #64809
 pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 .tag{display:inline-block;border:1px solid #648096;border-radius:14px;padding:3px 9px;margin:3px;font-size:12px}
 .preview{display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;border:1px solid #648096;padding:10px;border-radius:10px;margin:7px;vertical-align:top}
-.preview img,.preview video{width:210px;max-width:100%;border-radius:6px}
+.preview img,.preview video{width:280px;max-width:100%;border-radius:9px}
+.preview{cursor:pointer;transition:border-color .15s}
+.preview.selected{border:3px solid #54d7be;background:#264d4c}
+.generated-note{font-size:13px;color:#f4d5ad}
+.hero-action{background:#46d0c3;color:#08212c;font-size:16px;padding:14px 20px}
+details.creative-details{margin-top:12px;color:#9ab0c2}
+.preview-label{color:#d8ecf4;font-size:13px}
 #library img{height:55px;width:55px;object-fit:cover;vertical-align:middle;margin-right:8px}
 </style></head><body><main>
 <a href="/">← Back to A2Z tools</a><h1>A2Z Marketing Center</h1>
-<p class="sub">AI plans the posts; approved real store photos and footage become branded graphics and short reels. Review the complete post before approving. No publishing is connected.</p>
+<p class="sub">AI creates captions and image-led promotional concepts. Choose the finished visual, approve, revise, or reject. Generated concepts are not photos of store inventory. Social publishing is not connected.</p>
 <section class="card"><h2>Store photo library</h2><p class="sub">Only upload photos or video you own or are licensed to use. Tags help match the right subject. No synthetic animal images.</p>
 <form id="upload"><input id="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" required>
 <input id="label" placeholder="Photo label" maxlength="180">
@@ -402,7 +408,7 @@ async function refresh(){
  const meta=node('div');for(const m of [d.category,d.status,d.platforms.join(' + ')])meta.append(node('span',m,'tag'));card.append(meta);
  let currentCreative=null;
  const actions=node('div',undefined,'review-actions');
- const approveAction=node('button','✓ Approve finished post','approve');
+ const approveAction=node('button','✓ Approve selected visual + caption','approve');
  approveAction.disabled=true;
  approveAction.onclick=async()=>{if(!currentCreative)return;approveAction.disabled=true;try{
  await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'approve',creative_id:currentCreative.id})});
@@ -413,8 +419,16 @@ async function refresh(){
  else actions.append(node('strong',d.status==='approved'?'Approved (not published)':'Rejected'));
  card.append(actions);
 
- card.append(node('h3','Caption'),node('pre',d.caption),node('h3','Creative brief'),node('pre',d.creative_brief));
- card.append(node('small','Notes: '+d.source_notes));
+ card.append(node('h3','Caption'),node('pre',d.caption));
+ const context=node('details',undefined,'creative-details');const sum=node('summary','AI planning notes & creative brief');
+ context.append(sum,node('pre',d.creative_brief),node('small','Notes: '+d.source_notes));card.append(context);
+ if(d.status==='pending'){
+  const photoBtn=node('button','✨ Create realistic AI visual','hero-action');
+  photoBtn.onclick=async()=>{photoBtn.disabled=true;msg.textContent='Generating a realistic visual concept for '+d.title+'...';
+    try{await api('/marketing/api/drafts/'+d.id+'/ai-visual',{method:'POST'});await refreshGallery();msg.textContent='Your new image-led concept is ready to review.'}
+    catch(err){msg.textContent=err.message}finally{photoBtn.disabled=false}};
+  card.append(photoBtn,node('p','Creates an illustrative AI scene, not an image of actual A2Z stock. Image API usage may incur charges.','generated-note'))
+ }
  const gallery=node('div');card.append(gallery);
  if(d.status==='pending'){const alternative=node('button','Try another graphic design');alternative.onclick=async()=>{
  alternative.disabled=true;try{
@@ -427,13 +441,18 @@ async function refresh(){
  async function refreshGallery(){
   const result=await api('/marketing/api/drafts/'+d.id+'/creatives');
   gallery.replaceChildren(node('h3','Finished creative previews'));
-  currentCreative=result.data[0]||null;approveAction.disabled=!currentCreative;
-  if(!result.data.length)gallery.append(node('p','No media generated yet. Choose a tagged store photo and create a graphic.'));
+  currentCreative=result.data[0]||null;approveAction.disabled=!currentCreative || d.status!=='pending';
+  if(!result.data.length)gallery.append(node('p','No finished creative yet. Choose Create realistic AI visual to generate one.'));
   for(const item of result.data){
     const tile=node('div',undefined,'preview');
     if(item.mime==='video/mp4'){const vid=node('video');vid.src=item.url;vid.controls=true;tile.append(vid)}
     else{const img=node('img');img.src=item.url;img.alt=item.format+' A2Z branded graphic';tile.append(img)}
-    tile.append(node('small',item.format+' creative #'+item.id));
+    tile.append(node('small',(item.format==='ai-portrait'?'AI CONCEPT · Not store inventory':item.format)+' creative #'+item.id,'preview-label'));
+    tile.onclick=()=>{if(d.status!=='pending')return;currentCreative=item;approveAction.disabled=false;
+       for(const child of gallery.querySelectorAll('.preview'))child.classList.remove('selected');
+       tile.classList.add('selected');
+       msg.textContent='Selected creative #'+item.id+' for approval.'};
+    if(currentCreative&&currentCreative.id===item.id)tile.classList.add('selected');
     if(d.status==='pending'){
       const btn=node('button','Approve this finished post','approve');
       btn.onclick=async()=>{btn.disabled=true;try{await api('/marketing/api/drafts/'+d.id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'approve',creative_id:item.id})});await refresh()}catch(err){msg.textContent=err.message;btn.disabled=false}};tile.append(btn)
@@ -470,7 +489,7 @@ async function refresh(){
 }
 document.getElementById('generate').onclick=async function(){
  this.disabled=true;msg.textContent='Generating ideas...';
- try{await api('/marketing/api/generate',{method:'POST'});await refresh();msg.textContent='New posts are ready for creative production.'}
+ try{await api('/marketing/api/generate',{method:'POST'});await refresh();msg.textContent='New drafts created. Generate a realistic AI visual to replace a plain poster.'}
  catch(err){msg.textContent=err.message}finally{this.disabled=false}
 };
 document.getElementById('fill-media').onclick=async function(){
