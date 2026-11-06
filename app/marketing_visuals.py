@@ -35,6 +35,15 @@ def headline_for(title: str) -> str:
     return " ".join(words[:6]).upper()
 
 
+def overlay_title(draft: MarketingDraft) -> str:
+    """Prefer the creative brief's short proposed onscreen hook."""
+    brief = draft.creative_brief or ""
+    hit = re.search(r"(?:text overlay|overlay headline|on-image headline|headline)\\s*:\\s*['\\\"]([^'\\\"]{5,80})['\\\"]", brief, re.IGNORECASE)
+    if hit:
+        return hit.group(1).strip()
+    return draft.title
+
+
 def creative_prompt(draft: MarketingDraft) -> str:
     # Do not inject generic "sales floor" claims, exact products, labels, or
     # invented livestock. This image is conceptual editorial art.
@@ -145,7 +154,7 @@ async def generate_visual(draft_id: int):
         if count >= 5:
             raise HTTPException(429, "Five AI concepts already exist for this post")
         prompt = creative_prompt(draft)
-        title = draft.title
+        title = overlay_title(draft)
         fingerprint = content_fingerprint(draft)
     async with httpx.AsyncClient(timeout=180) as client:
         try:
